@@ -1,0 +1,14 @@
+PyCOL Optimized
+Copyright 2026 Muhammad Syafiq Mohd Pozi
+
+This package provides independent float32 PyTorch implementations of selected
+data-complexity metrics and an optional compatibility adapter for the PyCOL
+scientific reference.
+
+PyCOL (Python Class Overlap Library) is a separate MIT-licensed project:
+https://github.com/DiogoApostolo/pycol
+
+PyCOL source code is not bundled in this distribution. Installing the optional
+`reference` extra installs the separately distributed
+`pycol-complexity==1.0.4` package. PyCOL Optimized is not affiliated with or
+endorsed by the PyCOL maintainers.
