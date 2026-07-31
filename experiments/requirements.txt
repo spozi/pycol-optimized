@@ -1,0 +1,14 @@
+# Dependencies for the experiments only. The library in ../src needs just
+# numpy and torch; everything below is for BERT and the evaluation metrics.
+#
+# On a GPU server, install torch first from the index matching the CUDA
+# version, then this file:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements.txt
+#   pip install -e ..
+
+torch>=2.13,<3
+numpy>=2.2,<3
+transformers>=4.44
+scikit-learn>=1.5
