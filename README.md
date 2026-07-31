@@ -143,8 +143,27 @@ reference = compute_n1_reference(vectors, labels)
 
 ## Devices and numerical behavior
 
-The CPU and Apple MPS paths are validated. The CUDA code path uses the same
-PyTorch operations but has not yet been benchmarked on NVIDIA hardware.
+`tests/test_devices.py` runs the engine, the primitives, the measures, and the
+sphere cover on every accelerator the machine actually has, and compares each
+against CPU. Neighbour indices, nearest friend and enemy, local set sizes, and
+sphere absorption must agree exactly; float measures must agree to `1e-5`. It
+also asserts the capability probes describe the device truthfully, that the
+reproducible compute mode really is block-size invariant *on that device*, and
+that block sizing works against the driver's own reported memory.
+
+On a machine with no accelerator those comparisons skip with a stated reason
+rather than passing silently.
+
+This means the **CPU and Apple MPS** paths are covered by the test suite, on
+Apple Silicon. The **CUDA** path is written against the same PyTorch operations
+and the same tests will exercise it automatically on NVIDIA hardware, but no
+such run has happened, so treat CUDA as untested rather than validated. Its
+compute-mode default is inferred from the MPS measurement, not measured.
+
+Accelerators are not always faster. See
+[Choosing a compute mode](#choosing-a-compute-mode) for a measurement where MPS
+loses to CPU below roughly thirty thousand samples, because neighbour selection
+rather than distance computation dominates.
 
 The implementation intentionally uses float32. Results normally agree with
 the official float64 reference within the documented tolerances, but
