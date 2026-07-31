@@ -81,20 +81,37 @@ python -m complexity_augmentation.run --skip-training
 python -m complexity_augmentation.run --output-dir results
 ```
 
-On a GPU server, install torch from the index matching the driver's CUDA
-version *before* the rest, then run as above — `--device` defaults to `auto`
-and picks CUDA on its own:
+On a GPU server, install torch from the index matching the *card*, not just the
+driver, then run as above — `--device` defaults to `auto` and picks CUDA on its
+own:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt && pip install -e ..
-python -m complexity_augmentation.run --output-dir results --batch-size 32
+python -m complexity_augmentation.run --output-dir results
 ```
 
-Mixed precision and pinned-memory loading switch on automatically when the
-device is CUDA and stay off everywhere else (`TrainConfig.amp`,
-`TrainConfig.num_workers`). A larger `--batch-size` is usually worth it on a
-discrete GPU; 16 is the default because it is the safer figure on a laptop.
+**Check the wheel actually has kernels for the card before anything else.** A
+torch build can import, report `cuda.is_available() == True`, and still fail at
+the first matmul if it carries no cubin for that architecture — Blackwell
+(RTX 50-series, `sm_120`) is the current instance of this, and older `cu124`
+wheels do not cover it. One command settles it:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, \
+torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0)); \
+print(torch.cuda.get_arch_list()); \
+print((torch.randn(4096,4096,device='cuda')@torch.randn(4096,4096,device='cuda')).sum().item())"
+```
+
+The capability must appear in the arch list and the matmul must return a number.
+`no kernel image is available for execution on the device` means the wheel is
+too old for the card, regardless of what the driver supports.
+
+Mixed precision, pinned memory, and loader workers switch on automatically under
+CUDA and stay off elsewhere. The autocast dtype is bf16 wherever the card
+supports it and fp16 otherwise; bf16 keeps fp32's exponent range, so no loss
+scaling is involved. The precision used is recorded in every result row.
 
 Runtime has only been measured on Metal, and only for a 96-sample smoke run, so
 there is no honest estimate for the full run yet. Get one cheaply before
@@ -103,6 +120,35 @@ committing the machine to it:
 ```bash
 python -m complexity_augmentation.run --arms baseline --seeds 0 --epochs 1
 ```
+
+### Choosing parameters
+
+The dataset is small — 4,460 training texts — so **steps, not memory, are the
+binding constraint**, and a large-VRAM card does not change that. Batch size
+sets how many optimizer steps each arm gets across three epochs:
+
+| `--batch-size` | baseline | duplicate / uniform | minority |
+| --- | --- | --- | --- |
+| 16 | 837 | 1,674 | 1,449 |
+| 32 | 420 | 837 | 726 |
+| 64 | 210 | 419 | 363 |
+| 128 | 105 | 210 | 182 |
+
+At 128 the baseline arm gets about a hundred updates, which is not enough to
+fine-tune BERT reliably; the arms would differ by optimization budget as much as
+by data. Stay at 16 or 32 and raise `--learning-rate` only if you move up:
+2e-5 at batch 16–32 is the well-characterised setting.
+
+Spare GPU capacity is better spent on `--seeds 0 1 2 3 4` and on sweeping
+`--mask-prob 0.10 0.15 0.20` (the paper's three values, one run each) than on
+larger batches. Seeds buy confidence in a difference; batch size past 32 only
+buys utilization.
+
+One confound to keep in view: at fixed epochs the augmented arms take roughly
+twice as many optimizer steps as the baseline, simply because they hold twice
+the data. The `duplicate` arm controls for this as well as for sample size — it
+gets the same doubled step count while adding no information, so a `uniform`
+gain over `duplicate` is not just extra training.
 
 Writes `results.json` (everything) and `report.md` (complexity deltas, then
 downstream metrics). Embeddings are cached in `cache/`, so re-running the

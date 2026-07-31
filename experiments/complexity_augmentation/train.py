@@ -190,7 +190,13 @@ def train_and_evaluate(
     # enabled on MPS: fp16 autocast on Metal still produces wrong results in
     # places, and BERT-base at this scale does not need it.
     use_amp = on_cuda and config.amp
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    # bf16 where the card supports it (Ampere and later, so certainly on
+    # Blackwell).  It carries fp32's exponent range, so activations cannot
+    # overflow and no loss scaling is needed; fp16 is the fallback for older
+    # cards and does need the scaler.  The scaler is a pass-through when
+    # disabled, so one code path covers both.
+    amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype is torch.float16)
 
     model.train()
     for epoch in range(config.epochs):
@@ -200,7 +206,7 @@ def train_and_evaluate(
                 key: value.to(torch_device, non_blocking=on_cuda) for key, value in batch.items()
             }
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 outputs = model(**batch)
             scaler.scale(outputs.loss).backward()
             # Unscale before clipping, or the threshold applies to scaled grads.
@@ -224,7 +230,7 @@ def train_and_evaluate(
             batch = {
                 key: value.to(torch_device, non_blocking=on_cuda) for key, value in batch.items()
             }
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                 output = model(**batch).logits
             # Back to fp32 before softmax so the probabilities are comparable
             # across devices regardless of what precision produced them.
@@ -243,7 +249,11 @@ def train_and_evaluate(
     return {
         "seed": seed,
         "device": torch_device.type,
+        # Recorded because it changes the arithmetic: runs in different
+        # precisions are not directly comparable.
+        "precision": str(amp_dtype).removeprefix("torch.") if use_amp else "float32",
         "n_train": len(train_texts),
+        "steps": total_steps,
         "seconds": time.perf_counter() - started,
         **_metrics(np.asarray(test_labels, dtype=np.int64), predicted, scores.astype(np.float64)),
     }

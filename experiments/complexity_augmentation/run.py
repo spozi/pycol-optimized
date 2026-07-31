@@ -61,6 +61,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--test-fraction", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--aug-batch-size",
+        type=int,
+        default=64,
+        help="batch size for the mask-fill pass, which is inference-only and so "
+        "takes a much larger batch than training; raise it on a big GPU",
+    )
+    parser.add_argument(
+        "--embed-batch-size",
+        type=int,
+        default=64,
+        help="batch size for the frozen encoder (inference-only, same reasoning)",
+    )
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--device", default="auto")
@@ -192,13 +205,19 @@ def main(argv: list[str] | None = None) -> None:
             mask_probability=args.mask_prob,
             device=args.device,
             max_length=args.max_length,
+            batch_size=args.aug_batch_size,
             fill_strategy=args.fill_strategy,
             avoid_original=args.avoid_original,
         )
         if needs_fill
         else None
     )
-    encoder = FrozenEncoder(args.embed_model, device=args.device, max_length=args.max_length)
+    encoder = FrozenEncoder(
+        args.embed_model,
+        device=args.device,
+        max_length=args.max_length,
+        batch_size=args.embed_batch_size,
+    )
 
     results: dict[str, Any] = {
         "config": vars(args)
