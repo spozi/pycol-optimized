@@ -172,7 +172,13 @@ def test_absorbed_spheres_hand_their_contents_to_the_absorber() -> None:
 
 
 def _clusters(spread: float = 0.3, gap: float = 8.0, per_class: int = 40, seed: int = 1):
-    """Separated clusters, where spheres actually grow large enough to absorb."""
+    """Two well-separated Gaussian blobs, so spheres grow across a wide gap.
+
+    Whether any sphere is actually *absorbed* here is decided within about 1e-7
+    of the containment boundary, so it comes out as one absorption on some
+    platforms and none on others.  Nothing may assert on that count; the
+    absorption path is covered by the explicit-radius tests instead.
+    """
 
     generator = np.random.default_rng(seed)
     first = generator.normal(0.0, spread, size=(per_class, 2))
@@ -182,19 +188,88 @@ def _clusters(spread: float = 0.3, gap: float = 8.0, per_class: int = 40, seed: 
     return vectors, labels
 
 
-def test_absorption_actually_fires_on_separated_clusters() -> None:
-    # The random cohort never absorbs a single sphere, so the parity tests above
-    # would pass against a no-op.  Separated clusters grow spheres large enough
-    # to contain one another and exercise the tally for real.
-    vectors, labels = _clusters()
-    coverage = _coverage(vectors, labels)
+def _explicit_cover(vectors, radius, *, block_size: int = 8):
+    """Drive ContainingSphere with chosen radii instead of derived ones.
 
-    assert coverage.diagnostics["absorbed_count"] > 0
+    Radii that come out of ``sphere_radii`` cannot produce a comfortable
+    absorption: a radius is bounded by the distance to the nearest enemy, so the
+    triangle inequality forces ``r_j - r_i <= d_ij`` and containment can only
+    ever hold at near-equality.  On generated data the winning margin lands
+    around 1e-7 -- below float32 epsilon -- so which side it falls on depends on
+    the platform's BLAS.  Supplying radii directly decouples the reducer from
+    that degeneracy and lets absorption be tested with real headroom.
+    """
+
+    backend = resolve_backend("cpu")
+    engine = TileEngine(
+        heom_kernel(vectors, backend=backend), backend=backend, block_size=block_size
+    )
+    absorber = engine.run([ContainingSphere(radius=radius)]).results["containing_sphere"]
+    return sphere_coverage(np.asarray(radius, dtype=np.float64), absorber)
+
+
+def test_absorption_actually_fires_and_is_tallied() -> None:
+    # The random cohort absorbs nothing, so the parity tests above would pass
+    # against a no-op.  Here sphere 0 sits 1.0 away from sphere 1 while the
+    # radii differ by 4.9, clearing containment by 3.9 -- seven orders of
+    # magnitude above the float32 noise floor, so the outcome is the geometry
+    # rather than the rounding.
+    vectors = np.asarray([[0.0], [1.0], [10.0]], dtype=np.float32)
+    coverage = _explicit_cover(vectors, [0.1, 5.0, 0.2])
+
+    # Sphere 0 is swallowed by sphere 1; sphere 2 is 9.0 away and stays free.
+    assert coverage.absorbed.tolist() == [0, 2, 1]
+    assert coverage.diagnostics["absorbed_count"] == 1
+    assert coverage.diagnostics["sphere_count"] == 2
     assert coverage.absorbed.sum() == len(vectors)
 
 
+def test_a_sphere_just_outside_another_is_not_swallowed() -> None:
+    # The conditioning guard, as an arithmetic fact rather than a parity check.
+    # Two equal radii of 1e6 with a 0.02 gap: the correct test asks whether
+    # 0.02 <= 0.0 and says no.  Written the reference's way, as
+    # "distance + inner <= outer", float32 rounds 1e6 + 0.02 straight back to
+    # 1e6 -- one ulp there is 0.0625 -- and the sphere is absorbed.
+    assert np.float32(1e6) + np.float32(0.02) == np.float32(1e6)
+
+    vectors = np.asarray([[0.0], [0.02]], dtype=np.float32)
+    coverage = _explicit_cover(vectors, [1e6, 1e6], block_size=2)
+
+    assert coverage.diagnostics["absorbed_count"] == 0
+    assert coverage.absorbed.tolist() == [1, 1]
+
+
+def test_several_spheres_accumulate_in_one_absorber() -> None:
+    # Two spheres swallowed by the same third.  The reducer keeps the *largest*
+    # container, so both go straight to sphere 2 rather than one landing in the
+    # other.
+    vectors = np.asarray([[0.0], [0.5], [1.0]], dtype=np.float32)
+    coverage = _explicit_cover(vectors, [0.1, 2.0, 20.0], block_size=3)
+
+    assert coverage.absorbed.tolist() == [0, 0, 3]
+    assert coverage.diagnostics["sphere_count"] == 1
+
+
+def test_absorption_is_handed_along_a_chain() -> None:
+    # sphere_coverage hands a swallowed sphere's contents to its absorber, so a
+    # multi-hop chain must accumulate rather than lose the earliest sphere.
+    #
+    # Geometry alone cannot produce such a chain: if sphere 1 contains sphere 0
+    # and sphere 2 contains sphere 1, the triangle inequality puts sphere 0
+    # inside sphere 2 as well, and the reducer would pick sphere 2 for both.
+    # The tally is written to survive it regardless, so it is exercised here by
+    # handing sphere_coverage the absorber ranks directly.
+    coverage = sphere_coverage(
+        np.asarray([1.0, 2.0, 3.0]),
+        np.asarray([1, 2, -1]),  # 0 -> rank 1, 1 -> rank 2, 2 free
+    )
+
+    assert coverage.absorbed.tolist() == [0, 0, 3]
+    assert coverage.diagnostics["absorbed_count"] == 2
+
+
 @pytest.mark.parametrize("imb", [False, True])
-def test_t1_matches_the_reference_where_spheres_absorb(imb: bool) -> None:
+def test_t1_matches_the_reference_on_separated_clusters(imb: bool) -> None:
     vectors, labels = _clusters()
     observed = t1(_coverage(vectors, labels), labels, imb=imb)
     assert np.allclose(
@@ -204,11 +279,21 @@ def test_t1_matches_the_reference_where_spheres_absorb(imb: bool) -> None:
     )
 
 
-def test_containment_holds_at_the_precision_boundary() -> None:
-    # A sphere sitting a hair outside another must not be swallowed.  Writing
-    # the test as "distance + inner <= outer" rounds the sum onto the outer
-    # radius in float32 and absorbs it; comparing against the radius difference
-    # keeps both sides at the scale of the gap.
+def test_the_absorption_tally_matches_the_reference_on_separated_clusters() -> None:
+    # Parity of the whole tally against the reference on clustered data.
+    #
+    # This is deliberately *not* the guard for the radius-difference
+    # conditioning -- see test_a_sphere_just_outside_another_is_not_swallowed
+    # for that.  Both sides here read the same distance matrix, so they tend to
+    # fall on the same side of a boundary and agree even when the boundary
+    # decision itself is arbitrary.
+    #
+    # If this ever fails on one platform only, that is the reason: on this
+    # fixture the closest containment decision sits within about 1e-7 of the
+    # boundary, which is below float32 epsilon, and the two implementations use
+    # different formulas (ours "d <= r_j - r_i" in float32, the reference's
+    # "d + r_i <= r_j" in float64).  Every seed tried behaves the same way, so
+    # it is a property of the measure rather than of this fixture.
     vectors, labels = _clusters()
     coverage = _coverage(vectors, labels)
     expected, _ = _upstream(vectors, labels)._Complexity__get_sphere_count()
