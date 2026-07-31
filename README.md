@@ -154,11 +154,18 @@ that block sizing works against the driver's own reported memory.
 On a machine with no accelerator those comparisons skip with a stated reason
 rather than passing silently.
 
-This means the **CPU and Apple MPS** paths are covered by the test suite, on
-Apple Silicon. The **CUDA** path is written against the same PyTorch operations
-and the same tests will exercise it automatically on NVIDIA hardware, but no
-such run has happened, so treat CUDA as untested rather than validated. Its
-compute-mode default is inferred from the MPS measurement, not measured.
+This means the **CPU**, **Apple MPS**, and **CUDA** paths are all covered: CPU
+and MPS on Apple Silicon, CPU and CUDA on an NVIDIA GPU under Google Colab.
+Every device test passes on CUDA, so its capability probes, its agreement with
+CPU on neighbours and sphere absorption, its block-size invariance under the
+reproducible mode, and its block sizing against the driver's reported memory
+are all measured rather than assumed.
+
+One CUDA claim is still inferred, and it is a performance claim, not a
+correctness one. The suite asserts that `auto` resolves to the matrix-multiply
+mode on CUDA, but that only confirms the policy this library writes down. No
+NVIDIA benchmark has been run to show that mode is actually the faster one
+there, as it was shown to be on MPS.
 
 Accelerators are not always faster. See
 [Choosing a compute mode](#choosing-a-compute-mode) for a measurement where MPS
@@ -478,8 +485,10 @@ result.diagnostics["block_size_invariant"]  # True or False
 result.diagnostics["kernel"]["compute_mode_source"]  # "auto:mps" or "explicit"
 ```
 
-The CUDA row is inferred from the MPS result, not measured; no NVIDIA benchmark
-has been run.
+The CUDA row is correctness-tested but not benchmarked. `tests/test_devices.py`
+confirms on real NVIDIA hardware that `auto` resolves this way and that results
+still match CPU; the belief that the matrix-multiply mode is *faster* there is
+carried over from the MPS measurement below.
 
 Measurements on one Apple Silicon machine, `n = 32,000`, 20 features, `k = 5`,
 computing a k-nearest-neighbour prefix and nearest-enemy assignment in one
