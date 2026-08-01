@@ -75,7 +75,24 @@ class PadCollator:
         return dict(padded)
 
 
-def _metrics(labels: NDArray[np.int64], predicted: NDArray[np.int64], scores: NDArray[np.float64]):
+def _metrics(
+    labels: NDArray[np.int64],
+    predicted: NDArray[np.int64],
+    proba: NDArray[np.float64],
+    *,
+    minority_label: int,
+    n_classes: int,
+) -> dict[str, float]:
+    """Score a prediction, with the minority class called out separately.
+
+    Accuracy is near-useless under skew -- always predicting the majority
+    already scores well -- so macro F1, the minority class's own
+    precision/recall/F1, and its one-vs-rest average precision are the numbers
+    that matter.  Minority AP is the one that moves when a model trades recall
+    for precision, and it is defined identically whether there are two classes
+    or seventy-seven.
+    """
+
     from sklearn.metrics import (
         average_precision_score,
         f1_score,
@@ -85,18 +102,42 @@ def _metrics(labels: NDArray[np.int64], predicted: NDArray[np.int64], scores: ND
     )
 
     precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, predicted, labels=[1], average=None, zero_division=0
+        labels, predicted, labels=[minority_label], average=None, zero_division=0
     )
-    return {
+    scored = {
         "accuracy": float((labels == predicted).mean()),
         "macro_f1": float(f1_score(labels, predicted, average="macro", zero_division=0)),
         "minority_precision": float(precision[0]),
         "minority_recall": float(recall[0]),
         "minority_f1": float(f1[0]),
         "mcc": float(matthews_corrcoef(labels, predicted)),
-        "average_precision": float(average_precision_score(labels, scores)),
-        "roc_auc": float(roc_auc_score(labels, scores)),
     }
+
+    is_minority = (labels == minority_label).astype(np.int64)
+    if 0 < is_minority.sum() < len(labels):
+        scored["minority_average_precision"] = float(
+            average_precision_score(is_minority, proba[:, minority_label])
+        )
+
+    # Ranking metrics over every class need every class present in the test
+    # half; a rare class can be missing after a small split, so this is
+    # attempted rather than assumed.
+    try:
+        if n_classes == 2:
+            scored["roc_auc"] = float(roc_auc_score(labels, proba[:, 1]))
+            scored["average_precision"] = scored.get("minority_average_precision", float("nan"))
+        elif len(np.unique(labels)) == n_classes:
+            scored["roc_auc"] = float(
+                roc_auc_score(labels, proba, multi_class="ovr", average="macro")
+            )
+            scored["average_precision"] = float(
+                average_precision_score(np.eye(n_classes)[labels], proba, average="macro")
+            )
+    except ValueError:
+        # Degenerate split: leave the ranking metrics out rather than emit a
+        # number whose meaning depends on which classes happened to appear.
+        pass
+    return scored
 
 
 def train_and_evaluate(
@@ -109,12 +150,21 @@ def train_and_evaluate(
     seed: int = 0,
     device: str = "auto",
     verbose: bool = True,
+    n_classes: int | None = None,
+    minority_label: int | None = None,
 ) -> dict[str, Any]:
     """Fine-tune once and return test-set metrics."""
 
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     config = config or TrainConfig()
+    train_labels = np.asarray(train_labels, dtype=np.int64)
+    test_labels = np.asarray(test_labels, dtype=np.int64)
+    if n_classes is None:
+        n_classes = int(max(train_labels.max(), test_labels.max())) + 1
+    if minority_label is None:
+        counts = np.bincount(train_labels, minlength=n_classes)
+        minority_label = int(np.where(counts == 0, counts.max() + 1, counts).argmin())
     seed_everything(seed)
     torch_device = resolve_device(device)
     started = time.perf_counter()
@@ -159,9 +209,9 @@ def train_and_evaluate(
         **loader_kwargs,
     )
 
-    model = AutoModelForSequenceClassification.from_pretrained(config.model_name, num_labels=2).to(
-        torch_device
-    )
+    model = AutoModelForSequenceClassification.from_pretrained(
+        config.model_name, num_labels=n_classes
+    ).to(torch_device)
 
     decay = [
         p for n, p in model.named_parameters() if not any(k in n for k in ("bias", "LayerNorm"))
@@ -238,7 +288,7 @@ def train_and_evaluate(
 
     stacked = np.concatenate(logits, axis=0)
     predicted = stacked.argmax(axis=1).astype(np.int64)
-    scores = torch.softmax(torch.as_tensor(stacked), dim=1).numpy()[:, 1]
+    proba = torch.softmax(torch.as_tensor(stacked), dim=1).numpy().astype(np.float64)
 
     del model
     if torch_device.type == "cuda":
@@ -255,5 +305,9 @@ def train_and_evaluate(
         "n_train": len(train_texts),
         "steps": total_steps,
         "seconds": time.perf_counter() - started,
-        **_metrics(np.asarray(test_labels, dtype=np.int64), predicted, scores.astype(np.float64)),
+        "n_classes": n_classes,
+        "minority_label": minority_label,
+        **_metrics(
+            test_labels, predicted, proba, minority_label=minority_label, n_classes=n_classes
+        ),
     }

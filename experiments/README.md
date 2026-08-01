@@ -67,6 +67,55 @@ piece can corrupt a word (`Go until jurong` → `gorong gorong`). Since the fill
 model, the complexity encoder, and the classifier are all uncased, no arm sees a
 casing difference the others do not.
 
+### Datasets
+
+`--dataset` selects the corpus. Every one downloads from its origin on first
+use with nothing but the standard library — no dataset hub, no loading scripts,
+no authentication — and is cached thereafter. Figures below were measured
+through the loader, not quoted from papers:
+
+| `--dataset` | Train | Test | Classes | Skew | Minority | Character |
+| --- | --- | --- | --- | --- | --- | --- |
+| `phrasebank` | 1,811 | 453 | 3 | 4.6:1 | `negative` (242) | tiny; finance jargon; **non-commercial** |
+| `sms_spam` | 4,460 | 1,114 | 2 | 6.5:1 | `spam` (598) | saturates BERT — ceiling control |
+| `trec` | 4,761 | 1,191 | 6 | 14.1:1 | `ABBR` (76) | small, clean, fast |
+| `tweeteval` | 9,576 | 2,394 | 2 | 1.4:1 | `hate` (4,028) | hard but barely skewed |
+| `banking77` | 10,469 | 2,614 | 77 | 3.0:1 | `contactless…` (60) | many fine-grained classes |
+| `davidson` | 19,826 | 4,957 | 3 | 13.4:1 | `hate` (1,144) | noisy tweets; **contains slurs** |
+| `goemotions` | 36,358 | 9,088 | 28 | **337:1** | `grief` (38) | most extreme skew here |
+| `agnews` | 102,080 | 25,520 | 4 | 1.0:1 | — | balanced; large |
+
+**Which to use.** `sms_spam` is a poor primary choice: BERT reaches macro-F1
+above 0.9 from 400 samples and one epoch, so the baseline saturates and
+augmentation has no room to show an effect. On `trec` at 600 samples, kDN is
+0.47 against SMS Spam's 0.03 — the same panel, an order of magnitude more
+difficulty. Prefer `davidson` and `goemotions` for skew, `trec` for fast
+iteration, `agnews` for scale. Keep `sms_spam` as a ceiling control: a dataset
+where augmentation demonstrably *cannot* help is a useful negative reference.
+
+Binary corpora barely exercise the panel. R-value, D3, degOver, F1v, F2, and F3
+are all per-class-pair, and two classes means exactly one pair; `goemotions`
+gives 378 and `banking77` gives 2,926.
+
+**Reshaping.** `agnews` is balanced by construction, so it becomes an imbalance
+study only under `--imbalance-ratio`, which downsamples every class but the
+largest until majority:minority hits the given figure. `--max-train` then caps
+the total, keeping class shares. Both touch the **training half only** — the
+test half keeps its natural distribution, because a test set squeezed to the
+same skew would leave too few minority samples to measure recall on, and recall
+is the metric the whole experiment turns on.
+
+```bash
+# 20:1 imbalance, capped at 8k training samples
+python -m complexity_augmentation.run --dataset agnews \
+  --imbalance-ratio 20 --max-train 8000
+```
+
+**One quirk to expect.** F3 can exceed 1 on multi-class data. That is not a
+bug: the reference counts samples in the overlap region across the whole
+dataset while dividing by only the pair's size, and the library reproduces that
+rather than silently correcting it.
+
 ### Running
 
 ```bash
@@ -159,6 +208,9 @@ Useful flags:
 
 | Flag | Effect |
 | --- | --- |
+| `--dataset` | corpus to run on; see the table above |
+| `--imbalance-ratio` | downsample the training half to this majority:minority skew |
+| `--max-train` | cap the training half, keeping class shares |
 | `--mask-prob` | 0.10 / 0.15 / 0.20, the values swept in the paper |
 | `--fill-strategy joint` | fill every mask in one pass instead of one at a time |
 | `--avoid-original` | forbid the fill model from restoring the masked token |
@@ -174,9 +226,14 @@ informative.
 
 ### Reading the output
 
-Accuracy is not the headline. At a 1:6.5 class ratio, predicting "ham"
-everywhere scores about 87%. The metrics that move are macro F1, the minority
-class's own precision/recall/F1, and average precision.
+Accuracy is not the headline. At SMS Spam's 6.5:1 ratio, predicting "ham"
+everywhere already scores about 87%, and on `goemotions` at 337:1 the majority
+baseline is far higher still. The metrics that move are macro F1, the minority
+class's own precision/recall/F1, and its one-vs-rest average precision — the
+last being the one that shifts when a model trades minority recall for
+precision. `minority_average_precision` is defined identically whether there
+are two classes or seventy-seven, which is what makes arms comparable across
+corpora.
 
 The result this is built to detect is a *dissociation*: augmentation that lowers
 complexity without improving the classifier, or improves the classifier without

@@ -31,7 +31,7 @@ import numpy as np
 from .augment import DEFAULT_FILL_MODEL, DEFAULT_MASK_PROBABILITY, MaskFillAugmenter, build_arm
 from .common import resolve_device
 from .complexity import complexity_profile
-from .data import MINORITY_LABEL, load_split
+from .data import DATASETS, NON_COMMERCIAL, load_split
 from .embed import DEFAULT_EMBED_MODEL, FrozenEncoder, encode_cached
 from .train import TrainConfig, train_and_evaluate
 
@@ -41,6 +41,25 @@ ARMS = ("baseline", "duplicate", "uniform", "minority")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--dataset",
+        default="sms_spam",
+        choices=sorted(DATASETS),
+        help="corpus to run on; see the README table for sizes and skews",
+    )
+    parser.add_argument(
+        "--max-train",
+        type=int,
+        default=None,
+        help="cap the training half at this many samples, keeping class shares",
+    )
+    parser.add_argument(
+        "--imbalance-ratio",
+        type=float,
+        default=None,
+        help="downsample every class but the largest until majority:minority "
+        "equals this; the test half keeps its natural distribution",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
     parser.add_argument("--cache-dir", type=Path, default=Path("cache"))
@@ -110,12 +129,16 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
 def markdown_report(results: dict[str, Any]) -> str:
     """A readable summary: complexity deltas first, then downstream metrics."""
 
-    lines: list[str] = ["# Complexity-reducing augmentation on SMS Spam", ""]
     dataset = results["dataset"]
+    lines: list[str] = [
+        f"# Complexity-reducing augmentation on {dataset['dataset']}",
+        "",
+    ]
     lines += [
         f"Train {dataset['n_train']} / test {dataset['n_test']}, "
-        f"{dataset['train_positive']} spam in train "
-        f"(ratio {dataset['imbalance_ratio']:.2f}:1).",
+        f"{dataset['n_classes']} classes. Minority class "
+        f"{dataset['minority_name']!r} holds {dataset['minority_count']} training "
+        f"samples (ratio {dataset['imbalance_ratio']:.2f}:1).",
         "",
         "## Data complexity",
         "",
@@ -151,8 +174,8 @@ def markdown_report(results: dict[str, Any]) -> str:
             "minority_f1",
             "minority_precision",
             "minority_recall",
+            "minority_average_precision",
             "mcc",
-            "average_precision",
             "accuracy",
         ]
         lines += [
@@ -195,7 +218,19 @@ def main(argv: list[str] | None = None) -> None:
     started = time.perf_counter()
 
     print(f"device: {resolve_device(args.device)}", flush=True)
-    split = load_split(args.cache_dir, test_fraction=args.test_fraction, seed=args.split_seed)
+    if args.dataset in NON_COMMERCIAL:
+        print(
+            f"note: {args.dataset} is licensed for non-commercial use only",
+            flush=True,
+        )
+    split = load_split(
+        args.dataset,
+        args.cache_dir,
+        test_fraction=args.test_fraction,
+        seed=args.split_seed,
+        max_train=args.max_train,
+        imbalance_ratio=args.imbalance_ratio,
+    )
     print(f"dataset: {split.describe()}", flush=True)
 
     needs_fill = any(arm in {"uniform", "minority"} for arm in args.arms)
@@ -233,17 +268,22 @@ def main(argv: list[str] | None = None) -> None:
             split.train_labels,
             strategy=arm,
             augmenter=augmenter,
-            minority_label=MINORITY_LABEL,
+            minority_label=split.minority_label,
             seed=args.split_seed,
         )
         entry: dict[str, Any] = {
             "n_train": len(texts),
-            "positive_rate": float(labels.mean()),
+            # Share of the arm that is the minority class.  labels.mean()
+            # would be the mean class *index* once there are more than two.
+            "minority_rate": float((labels == split.minority_label).mean()),
             "augmentation": report,
         }
-        print(f"  n_train={len(texts)}  positive_rate={labels.mean():.4f}", flush=True)
+        print(
+            f"  n_train={len(texts)}  minority_rate={(labels == split.minority_label).mean():.4f}",
+            flush=True,
+        )
 
-        tag = f"{arm}_p{args.mask_prob}_{args.fill_strategy}"
+        tag = f"{args.dataset}_{arm}_p{args.mask_prob}_{args.fill_strategy}_n{len(texts)}"
         vectors = encode_cached(encoder, texts, args.cache_dir / f"embed_{tag}.npy")
         entry["complexity"] = complexity_profile(
             vectors,
@@ -280,6 +320,8 @@ def main(argv: list[str] | None = None) -> None:
                         config=config,
                         seed=seed,
                         device=args.device,
+                        n_classes=len(split.label_names),
+                        minority_label=split.minority_label,
                     )
                 )
                 print(
