@@ -81,7 +81,13 @@ class MaskFillAugmenter:
 
         self.device = resolve_device(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # eval() puts dropout in inference behaviour; freezing the parameters
+        # means a future edit that drops the inference_mode decorator cannot
+        # quietly start building autograd graphs over a model that is only ever
+        # used forward.
         self.model = AutoModelForMaskedLM.from_pretrained(model_name).to(self.device).eval()
+        for parameter in self.model.parameters():
+            parameter.requires_grad_(False)
         self.mask_probability = mask_probability
         self.max_length = max_length
         self.batch_size = batch_size
@@ -100,7 +106,7 @@ class MaskFillAugmenter:
             special |= input_ids == token_id
         return ~special
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _fill(self, input_ids: torch.Tensor, attention: torch.Tensor, original: torch.Tensor):
         """Replace every [MASK] with a predicted token."""
 

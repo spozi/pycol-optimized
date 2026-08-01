@@ -272,9 +272,13 @@ def train_and_evaluate(
                 flush=True,
             )
 
+    # eval() switches dropout off; inference_mode additionally skips autograd
+    # bookkeeping, which no_grad only partly avoids.  Every tensor produced
+    # here is turned into numpy before leaving the block, so none of them
+    # outlive inference mode.
     model.eval()
     logits: list[NDArray[np.float32]] = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in test_loader:
             batch.pop("labels")
             batch = {

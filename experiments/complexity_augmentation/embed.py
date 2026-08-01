@@ -83,7 +83,7 @@ class FrozenEncoder:
             tokenizer=augmenter.tokenizer,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def encode(self, texts: list[str]) -> NDArray[np.float32]:
         """Embed ``texts`` into a float32 ``[samples, hidden]`` matrix."""
 
