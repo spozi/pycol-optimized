@@ -33,10 +33,12 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import os
 import sys
+import urllib.error
 import urllib.request
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,22 +91,81 @@ class Split:
         }
 
 
-def _fetch(url: str, cache_dir: Path, filename: str, *, sha256: str | None = None) -> bytes:
-    """Download once, then serve from ``cache_dir``."""
+#: Default Hugging Face host, and the community mirror used when it is blocked
+#: or unreachable.  ``HF_ENDPOINT`` is the variable ``huggingface_hub`` itself
+#: reads, so setting it redirects model downloads too, not just these datasets.
+DEFAULT_HF_ENDPOINT = "https://huggingface.co"
+HF_MIRROR = "https://hf-mirror.com"
+
+
+def hf_endpoints() -> tuple[str, ...]:
+    """Hugging Face hosts to try, in order.
+
+    Whatever ``HF_ENDPOINT`` names comes first, then the mirror as a fallback.
+    Set ``HF_ENDPOINT=https://hf-mirror.com`` to reverse that and skip the
+    origin entirely, which also redirects the ``transformers`` model downloads.
+    """
+
+    configured = os.environ.get("HF_ENDPOINT", DEFAULT_HF_ENDPOINT).rstrip("/")
+    ordered = [configured]
+    if HF_MIRROR not in ordered:
+        ordered.append(HF_MIRROR)
+    return tuple(ordered)
+
+
+def hf_urls(path: str) -> tuple[str, ...]:
+    """Every candidate URL for a Hugging Face ``path``, best host first."""
+
+    return tuple(f"{endpoint}/{path.lstrip('/')}" for endpoint in hf_endpoints())
+
+
+def _fetch(
+    url: str | Sequence[str],
+    cache_dir: Path,
+    filename: str,
+    *,
+    sha256: str | None = None,
+) -> bytes:
+    """Download once, then serve from ``cache_dir``.
+
+    Several URLs may be given; they are tried in order and the first that
+    answers wins.  That is how a Hugging Face path falls back to the mirror
+    without the caller having to know which host is reachable today.
+    """
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / filename
     if target.exists():
         return target.read_bytes()
 
-    with urllib.request.urlopen(url, timeout=300) as response:  # noqa: S310
-        payload = response.read()
-    if sha256 is not None:
-        digest = hashlib.sha256(payload).hexdigest()
-        if digest != sha256:
-            raise RuntimeError(f"{filename} checksum changed: expected {sha256}, got {digest}")
-    target.write_bytes(payload)
-    return payload
+    candidates = (url,) if isinstance(url, str) else tuple(url)
+    if not candidates:
+        raise ValueError("at least one URL is required")
+
+    failures: list[str] = []
+    for candidate in candidates:
+        try:
+            with urllib.request.urlopen(candidate, timeout=300) as response:  # noqa: S310
+                payload = response.read()
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            failures.append(f"{candidate}: {type(error).__name__}: {error}")
+            continue
+
+        if sha256 is not None:
+            digest = hashlib.sha256(payload).hexdigest()
+            if digest != sha256:
+                # A wrong body is not a transport failure; a mirror serving
+                # different bytes must be reported, not silently accepted.
+                raise RuntimeError(
+                    f"{filename} checksum changed at {candidate}: expected {sha256}, got {digest}"
+                )
+        target.write_bytes(payload)
+        return payload
+
+    raise RuntimeError(
+        f"could not download {filename} from any of {len(candidates)} sources:\n  "
+        + "\n  ".join(failures)
+    )
 
 
 def _encode(raw: list[str]) -> tuple[NDArray[np.int64], tuple[str, ...]]:
@@ -172,8 +233,9 @@ def _load_phrasebank(cache_dir: Path) -> Loaded:
     # Licensed CC BY-NC-SA 3.0: research only.  The authors ask to be contacted
     # for commercial use -- see License.txt inside the archive.
     payload = _fetch(
-        "https://huggingface.co/datasets/takala/financial_phrasebank"
-        "/resolve/main/data/FinancialPhraseBank-v1.0.zip",
+        hf_urls(
+            "datasets/takala/financial_phrasebank/resolve/main/data/FinancialPhraseBank-v1.0.zip"
+        ),
         cache_dir,
         "phrasebank.zip",
     )

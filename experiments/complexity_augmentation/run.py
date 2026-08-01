@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="downsample every class but the largest until majority:minority "
         "equals this; the test half keeps its natural distribution",
+    )
+    parser.add_argument(
+        "--hf-endpoint",
+        default=None,
+        help="Hugging Face host, e.g. https://hf-mirror.com. Sets HF_ENDPOINT, so "
+        "the transformers model downloads follow it as well. Datasets fall back to "
+        "the mirror on their own regardless of this flag.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
     parser.add_argument("--cache-dir", type=Path, default=Path("cache"))
@@ -213,6 +221,12 @@ def markdown_report(results: dict[str, Any]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    # Must precede the first transformers import: huggingface_hub reads
+    # HF_ENDPOINT once, at its own import time.  Every transformers import in
+    # this package is deferred into a function for exactly this reason.
+    if args.hf_endpoint:
+        os.environ["HF_ENDPOINT"] = args.hf_endpoint.rstrip("/")
+        print(f"hugging face endpoint: {os.environ['HF_ENDPOINT']}", flush=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()

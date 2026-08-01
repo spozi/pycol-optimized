@@ -111,6 +111,31 @@ python -m complexity_augmentation.run --dataset agnews \
   --imbalance-ratio 20 --max-train 8000
 ```
 
+**If Hugging Face is unreachable.** Only `phrasebank` is served from Hugging
+Face; the rest come from UCI, GitHub, or UPenn. That one falls back to
+`hf-mirror.com` on its own when the origin does not answer, so no flag is
+needed for datasets.
+
+The models are the larger exposure — `bert-base-uncased` is pulled three times
+over, for the fill model, the frozen encoder, and the classifier. Redirect
+those with `--hf-endpoint`, which sets `HF_ENDPOINT` for `huggingface_hub`:
+
+```bash
+python -m complexity_augmentation.run --hf-endpoint https://hf-mirror.com
+# or, equivalently, for the whole shell:
+export HF_ENDPOINT=https://hf-mirror.com
+```
+
+`huggingface_hub` reads `HF_ENDPOINT` **once, at its own import time**, so
+setting it afterwards silently does nothing. That is why every `transformers`
+import in this package sits inside a function rather than at module level, and
+why `--hf-endpoint` is applied as the first statement of `main()`. If you set
+the variable yourself, set it before Python starts.
+
+Setting `HF_ENDPOINT` also reorders the dataset fallback, putting your chosen
+host first. Downloads are verified where a checksum is pinned: a mirror serving
+different bytes raises rather than being accepted quietly.
+
 **One quirk to expect.** F3 can exceed 1 on multi-class data. That is not a
 bug: the reference counts samples in the overlap region across the whole
 dataset while dividing by only the pair's size, and the library reproduces that
