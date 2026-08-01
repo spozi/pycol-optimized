@@ -21,6 +21,7 @@ produces on its own.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import time
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from .augment import DEFAULT_FILL_MODEL, DEFAULT_MASK_PROBABILITY, MaskFillAugmenter, build_arm
 from .common import resolve_device
@@ -132,6 +134,27 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
         }
         for key in keys
     }
+
+
+def release_models(*holders: Any, device: str = "auto") -> None:
+    """Drop the inference models and hand their memory back to the device.
+
+    The fill model and the frozen encoder are needed only while arms are being
+    built and embedded, but fine-tuning is much the longer phase.  Leaving
+    roughly 900 MB of idle weights resident through it takes memory the
+    classifier could otherwise spend on a larger batch.
+    """
+
+    for holder in holders:
+        if holder is not None:
+            holder.model = None
+            holder.tokenizer = None
+    gc.collect()
+    resolved = resolve_device(device)
+    if resolved.type == "cuda":
+        torch.cuda.empty_cache()
+    elif resolved.type == "mps":
+        torch.mps.empty_cache()
 
 
 def markdown_report(results: dict[str, Any]) -> str:
@@ -261,12 +284,24 @@ def main(argv: list[str] | None = None) -> None:
         if needs_fill
         else None
     )
-    encoder = FrozenEncoder(
-        args.embed_model,
-        device=args.device,
-        max_length=args.max_length,
-        batch_size=args.embed_batch_size,
-    )
+    # A masked-LM checkpoint already contains the encoder the embedder would
+    # load, bit-identical, so loading a second copy of the same weights is pure
+    # duplication.  Only valid when both name the same checkpoint.
+    if augmenter is not None and args.fill_model == args.embed_model:
+        encoder = FrozenEncoder.borrowing_from(
+            augmenter,
+            device=args.device,
+            max_length=args.max_length,
+            batch_size=args.embed_batch_size,
+        )
+        print(f"encoder: reusing the fill model's body ({args.fill_model})", flush=True)
+    else:
+        encoder = FrozenEncoder(
+            args.embed_model,
+            device=args.device,
+            max_length=args.max_length,
+            batch_size=args.embed_batch_size,
+        )
 
     results: dict[str, Any] = {
         "config": vars(args)
@@ -274,6 +309,11 @@ def main(argv: list[str] | None = None) -> None:
         "dataset": split.describe(),
         "arms": {},
     }
+
+    # Phase one builds and scores every arm; phase two trains them.  Splitting
+    # the run this way means the whole complexity table lands before a single
+    # GPU-hour goes into fine-tuning, so a bad configuration shows up early.
+    prepared: dict[str, tuple[list[str], Any]] = {}
 
     for arm in args.arms:
         print(f"\n=== arm: {arm} ===", flush=True)
@@ -314,14 +354,25 @@ def main(argv: list[str] | None = None) -> None:
         if entry["complexity"]["errors"]:
             print(f"  complexity errors: {entry['complexity']['errors']}", flush=True)
 
-        if not args.skip_training:
-            config = TrainConfig(
-                model_name=args.classifier,
-                max_length=args.max_length,
-                batch_size=args.batch_size,
-                epochs=args.epochs,
-                learning_rate=args.learning_rate,
-            )
+        prepared[arm] = (texts, labels)
+        results["arms"][arm] = entry
+        (args.output_dir / "results.json").write_text(json.dumps(results, indent=2, default=str))
+
+    # Neither inference model is wanted again, and fine-tuning is the long
+    # phase.  Free them before it rather than after.
+    release_models(augmenter, encoder, device=args.device)
+
+    if not args.skip_training:
+        config = TrainConfig(
+            model_name=args.classifier,
+            max_length=args.max_length,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+        )
+        for arm in args.arms:
+            texts, labels = prepared[arm]
+            print(f"\n=== training: {arm} (n={len(texts)}) ===", flush=True)
             runs = []
             for seed in args.seeds:
                 print(f"    seed {seed}", flush=True)
@@ -343,10 +394,10 @@ def main(argv: list[str] | None = None) -> None:
                     f"minority_f1={runs[-1]['minority_f1']:.4f}",
                     flush=True,
                 )
-            entry["classification"] = {"runs": runs, "summary": summarize(runs)}
-
-        results["arms"][arm] = entry
-        (args.output_dir / "results.json").write_text(json.dumps(results, indent=2, default=str))
+            results["arms"][arm]["classification"] = {"runs": runs, "summary": summarize(runs)}
+            (args.output_dir / "results.json").write_text(
+                json.dumps(results, indent=2, default=str)
+            )
 
     results["total_seconds"] = time.perf_counter() - started
     (args.output_dir / "results.json").write_text(json.dumps(results, indent=2, default=str))

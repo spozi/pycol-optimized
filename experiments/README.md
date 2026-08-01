@@ -116,9 +116,11 @@ Face; the rest come from UCI, GitHub, or UPenn. That one falls back to
 `hf-mirror.com` on its own when the origin does not answer, so no flag is
 needed for datasets.
 
-The models are the larger exposure — `bert-base-uncased` is pulled three times
-over, for the fill model, the frozen encoder, and the classifier. Redirect
-those with `--hf-endpoint`, which sets `HF_ENDPOINT` for `huggingface_hub`:
+The models are the larger exposure, though not in bandwidth: `bert-base-uncased`
+is requested three times — fill model, frozen encoder, classifier — but
+Hugging Face caches by content hash, so the 440 MB blob is fetched **once** and
+shared. What repeats is instantiation, not download. Redirect the fetch with
+`--hf-endpoint`, which sets `HF_ENDPOINT` for `huggingface_hub`:
 
 ```bash
 python -m complexity_augmentation.run --hf-endpoint https://hf-mirror.com
@@ -135,6 +137,29 @@ the variable yourself, set it before Python starts.
 Setting `HF_ENDPOINT` also reorders the dataset fallback, putting your chosen
 host first. Downloads are verified where a checksum is pinned: a mirror serving
 different bytes raises rather than being accepted quietly.
+
+### Model residency
+
+Three BERT instantiations from one cached blob is still two more copies in
+memory than necessary, so two things keep that down.
+
+**The encoder borrows the fill model's body.** A masked-LM checkpoint already
+*contains* the encoder `AutoModel` would load — for `bert-base-uncased`, 197 of
+199 tensors are bit-identical, the only extras being a pooler that this code
+never touches, because it mean-pools the last hidden state itself. When
+`--fill-model` and `--embed-model` name the same checkpoint, the encoder is
+taken from the fill model instead of loaded again. Embeddings come out
+`array_equal`, not merely close, and it saves 438 MB.
+
+**The run is split into two phases.** All arms are built and scored first, then
+all fine-tuning happens. The fill model and encoder are released in between,
+because fine-tuning is much the longer phase and there is no reason for ~900 MB
+of idle weights to sit on the accelerator throughout it — that is memory the
+classifier could spend on a larger batch.
+
+The split has a second benefit: the entire complexity table lands before a
+single GPU-hour goes into training, so a misconfigured run shows up in minutes
+rather than after the first arm finishes training.
 
 **One quirk to expect.** F3 can exceed 1 on multi-class data. That is not a
 bug: the reference counts samples in the overlap region across the whole

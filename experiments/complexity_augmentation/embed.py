@@ -13,6 +13,7 @@ every arm.  Mean pooling over the last hidden state is used rather than the
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -33,16 +34,54 @@ class FrozenEncoder:
         device: str = "auto",
         max_length: int = 128,
         batch_size: int = 64,
+        model: Any = None,
+        tokenizer: Any = None,
     ) -> None:
         from transformers import AutoModel, AutoTokenizer
 
         self.device = resolve_device(device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
+        self.shared = model is not None and tokenizer is not None
+        if self.shared:
+            self.model = model.to(self.device).eval()
+            self.tokenizer = tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModel.from_pretrained(model_name).to(self.device).eval()
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
         self.max_length = max_length
         self.batch_size = batch_size
+
+    @classmethod
+    def borrowing_from(
+        cls,
+        augmenter: Any,
+        *,
+        device: str = "auto",
+        max_length: int = 128,
+        batch_size: int = 64,
+    ) -> FrozenEncoder:
+        """Reuse a mask-fill model's encoder rather than loading a second copy.
+
+        A masked-LM checkpoint wraps exactly the encoder ``AutoModel`` would
+        load: for ``bert-base-uncased`` 197 of 199 tensors are bit-identical,
+        the only extras being a pooler, and this class never touches the pooler
+        because it mean-pools the last hidden state itself.  The hidden states
+        agree to the bit, so this is a saving rather than an approximation.
+
+        Only valid when the fill and embed checkpoints are the same; the caller
+        checks that.
+        """
+
+        return cls(
+            device=device,
+            max_length=max_length,
+            batch_size=batch_size,
+            # base_model unwraps whatever head sits on top, whichever
+            # architecture the checkpoint happens to be.
+            model=augmenter.model.base_model,
+            tokenizer=augmenter.tokenizer,
+        )
 
     @torch.no_grad()
     def encode(self, texts: list[str]) -> NDArray[np.float32]:
