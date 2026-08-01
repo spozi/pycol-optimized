@@ -4,7 +4,8 @@
 # On a GPU server, install torch first from the index matching the CUDA
 # version, then this file:
 #
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   python -m pip install "torch==2.13.0" \
+#       --index-url https://download.pytorch.org/whl/cu132
 #   pip install -r requirements.txt
 #   pip install -e ..
 

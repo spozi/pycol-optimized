@@ -86,7 +86,8 @@ driver, then run as above — `--device` defaults to `auto` and picks CUDA on it
 own:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install "torch==2.13.0" \
+  --index-url https://download.pytorch.org/whl/cu132
 pip install -r requirements.txt && pip install -e ..
 python -m complexity_augmentation.run --output-dir results
 ```
@@ -94,8 +95,8 @@ python -m complexity_augmentation.run --output-dir results
 **Check the wheel actually has kernels for the card before anything else.** A
 torch build can import, report `cuda.is_available() == True`, and still fail at
 the first matmul if it carries no cubin for that architecture — Blackwell
-(RTX 50-series, `sm_120`) is the current instance of this, and older `cu124`
-wheels do not cover it. One command settles it:
+(RTX 50-series, `sm_120`) is the current instance of this. CUDA 13.2 (`cu132`)
+is the pinned environment for this experiment. One command settles it:
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda, \
