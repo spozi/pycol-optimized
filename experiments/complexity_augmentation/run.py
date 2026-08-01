@@ -1,19 +1,23 @@
 """Run the full experiment: complexity before and after augmentation, then
 downstream classification on each arm.
 
-Four arms share one fixed test set:
+Five arms share one fixed test set:
 
-===========  ============================================================
-baseline     the training set untouched
-duplicate    every text copied verbatim -- doubles n, adds no information,
-             so whatever complexity change it produces is a size artifact
-uniform      one mask-fill copy of every text (Algorithm 1, 1x)
-minority     mask-fill copies of the minority class only, to rebalance
-===========  ============================================================
+==================  =====================================================
+baseline            the training set untouched
+duplicate           every text copied verbatim -- doubles n, adds no
+                    information, so any complexity change it produces is a
+                    size artifact
+uniform             one mask-fill copy of every text (Algorithm 1, 1x)
+minority_duplicate  verbatim copies of the minority class, rebalanced
+minority            mask-fill copies of the minority class, same target
+==================  =====================================================
 
-The duplicate arm is the reference point: a complexity drop is only evidence
-that the augmentation helped if it exceeds the drop that pure duplication
-produces on its own.
+Each augmented arm is paired with a control that reproduces its side effect
+while adding no information. duplicate holds sample size against uniform;
+minority_duplicate holds class composition against minority. A complexity
+drop is evidence of real simplification only where it exceeds its control --
+both rebalancing and sheer duplication move these measures on their own.
 
     python -m complexity_augmentation.run --output-dir results
 """
@@ -38,7 +42,8 @@ from .data import DATASETS, NON_COMMERCIAL, load_split
 from .embed import DEFAULT_EMBED_MODEL, FrozenEncoder, encode_cached
 from .train import TrainConfig, train_and_evaluate
 
-ARMS = ("baseline", "duplicate", "uniform", "minority")
+#: Order matters: each control precedes the arm it is the control for.
+ARMS = ("baseline", "duplicate", "uniform", "minority_duplicate", "minority")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -270,7 +275,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"dataset: {split.describe()}", flush=True)
 
-    needs_fill = any(arm in {"uniform", "minority"} for arm in args.arms)
+    needs_fill = any(arm in {"uniform", "minority"} for arm in args.arms)  # not the copy arms
     augmenter = (
         MaskFillAugmenter(
             args.fill_model,

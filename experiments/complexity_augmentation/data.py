@@ -10,18 +10,27 @@ test half is fixed once and never augmented.
 
 Sizes and skews below were measured, not quoted:
 
-===============  ========  =======  ==========  =====================
-Dataset          Samples   Classes  Skew        Note
-===============  ========  =======  ==========  =====================
-``sms_spam``        5,574        2      6.5:1    saturates BERT easily
-``phrasebank``      2,264        3      4.6:1    NON-COMMERCIAL licence
-``trec``            5,952        6     14.5:1    clean, fast
-``tweeteval``      11,970        2      1.4:1    hard but barely skewed
-``banking77``      13,083       77      5.3:1    many fine-grained classes
-``davidson``       24,783        3     13.4:1    slurs; noisy tweets
-``goemotions``     36,308       28    328.8:1    most extreme skew here
-``agnews``        127,600        4      1.0:1    balanced; large
-===============  ========  =======  ==========  =====================
+=================  ========  =======  ==========  =====================
+Dataset            Samples   Classes  Skew        Note
+=================  ========  =======  ==========  =====================
+``phrasebank``        2,264        3      4.6:1    NON-COMMERCIAL; saturates
+``phrasebank_75``     3,453        3      5.1:1    NON-COMMERCIAL
+``phrasebank_66``     4,217        3      4.9:1    NON-COMMERCIAL
+``phrasebank_50``     4,846        3      4.8:1    NON-COMMERCIAL; noisiest
+``sms_spam``          5,574        2      6.5:1    saturates BERT easily
+``trec``              5,952        6     14.5:1    clean, fast
+``tweeteval``        11,970        2      1.4:1    hard but barely skewed
+``banking77``        13,083       77      5.3:1    many fine-grained classes
+``davidson``         24,783        3     13.4:1    slurs; noisy tweets
+``goemotions``       36,308       28    328.8:1    most extreme skew here
+``agnews``          127,600        4      1.0:1    balanced; large
+=================  ========  =======  ==========  =====================
+
+The four ``phrasebank`` entries are one corpus at four annotator-agreement
+thresholds, so they sweep label noise with domain and skew held roughly fixed.
+``phrasebank`` (unanimous labels) is both the smallest and the easiest: BERT
+reaches macro F1 above 0.95 on it, leaving nothing for augmentation to improve.
+``phrasebank_50`` is the one to reach for.
 
 ``agnews`` is balanced by construction, so it is only an imbalance study once
 ``--imbalance-ratio`` is applied.  It is the size at which the tiled engine
@@ -229,28 +238,45 @@ def _load_trec(cache_dir: Path) -> Loaded:
     return texts, encoded, names
 
 
-def _load_phrasebank(cache_dir: Path) -> Loaded:
-    # Licensed CC BY-NC-SA 3.0: research only.  The authors ask to be contacted
-    # for commercial use -- see License.txt inside the archive.
-    payload = _fetch(
-        hf_urls(
-            "datasets/takala/financial_phrasebank/resolve/main/data/FinancialPhraseBank-v1.0.zip"
-        ),
-        cache_dir,
-        "phrasebank.zip",
-    )
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        member = next(n for n in archive.namelist() if n.endswith("Sentences_AllAgree.txt"))
-        body = archive.read(member).decode("latin-1")
+def _phrasebank(agreement: str) -> Callable[[Path], Loaded]:
+    """Loader for one annotator-agreement subset of the Financial PhraseBank.
 
-    texts, labels = [], []
-    for line in body.splitlines():
-        sentence, separator, label = line.rpartition("@")
-        if separator and sentence.strip():
-            texts.append(sentence.strip())
-            labels.append(label.strip())
-    encoded, names = _encode(labels)
-    return texts, encoded, names
+    The archive ships the same corpus at four agreement thresholds, which makes
+    it a label-noise axis with domain and skew held roughly constant:
+    ``50Agree`` keeps every sentence a bare majority of annotators agreed on,
+    ``AllAgree`` only those they agreed on unanimously.  Fewer sentences but
+    cleaner labels as the threshold rises -- 4,846 down to 2,264.
+
+    ``AllAgree`` is the easiest of the four and saturates BERT (macro F1 above
+    0.95), so it is a poor choice for detecting whether augmentation helps.
+    Prefer ``phrasebank_50`` unless the smallest possible corpus is the point.
+    """
+
+    def load(cache_dir: Path) -> Loaded:
+        # Licensed CC BY-NC-SA 3.0: research only.  The authors ask to be
+        # contacted for commercial use -- see License.txt inside the archive.
+        payload = _fetch(
+            hf_urls(
+                "datasets/takala/financial_phrasebank"
+                "/resolve/main/data/FinancialPhraseBank-v1.0.zip"
+            ),
+            cache_dir,
+            "phrasebank.zip",
+        )
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            member = next(n for n in archive.namelist() if n.endswith(f"Sentences_{agreement}.txt"))
+            body = archive.read(member).decode("latin-1")
+
+        texts, labels = [], []
+        for line in body.splitlines():
+            sentence, separator, label = line.rpartition("@")
+            if separator and sentence.strip():
+                texts.append(sentence.strip())
+                labels.append(label.strip())
+        encoded, names = _encode(labels)
+        return texts, encoded, names
+
+    return load
 
 
 def _load_tweeteval(cache_dir: Path) -> Loaded:
@@ -317,7 +343,11 @@ def _load_agnews(cache_dir: Path) -> Loaded:
 #: Loader per dataset name, as accepted by ``--dataset``.
 DATASETS: dict[str, Callable[[Path], Loaded]] = {
     "sms_spam": _load_sms_spam,
-    "phrasebank": _load_phrasebank,
+    # Same corpus at four annotator-agreement thresholds: a label-noise sweep.
+    "phrasebank": _phrasebank("AllAgree"),
+    "phrasebank_50": _phrasebank("50Agree"),
+    "phrasebank_66": _phrasebank("66Agree"),
+    "phrasebank_75": _phrasebank("75Agree"),
     "trec": _load_trec,
     "tweeteval": _load_tweeteval,
     "banking77": _load_banking77,
@@ -327,7 +357,7 @@ DATASETS: dict[str, Callable[[Path], Loaded]] = {
 }
 
 #: Corpora that may not be used commercially without a separate licence.
-NON_COMMERCIAL = frozenset({"phrasebank"})
+NON_COMMERCIAL = frozenset({"phrasebank", "phrasebank_50", "phrasebank_66", "phrasebank_75"})
 
 
 def stratified_split(

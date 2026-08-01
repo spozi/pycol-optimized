@@ -18,19 +18,27 @@ Journal of Supercomputing 81:1573,
 result to the original set.
 
 The paper applies this to code prompts, filling with GraphCodeBERT and routing
-with CodeBERT-python. Here the domain is ordinary English SMS, so the direct
-analogue is `bert-base-uncased` for both the fill and the classifier.
+with CodeBERT-python. Here the domain is ordinary English text across the
+corpora below, so the direct analogue is `bert-base-uncased` for both the fill
+and the classifier.
 
 ### Design
 
-Four arms share one fixed, never-augmented test set:
+Five arms share one fixed, never-augmented test set:
 
 | Arm | Training set | Purpose |
 | --- | --- | --- |
 | `baseline` | original | reference point |
-| `duplicate` | original + verbatim copy | **size control** |
+| `duplicate` | original + verbatim copy | **size control** for `uniform` |
 | `uniform` | original + one mask-fill copy of each | Algorithm 1 at 1× |
-| `minority` | original + mask-fill copies of the minority class | rebalancing |
+| `minority_duplicate` | original + verbatim minority copies | **composition control** for `minority` |
+| `minority` | original + mask-fill minority copies | rebalancing |
+
+Each augmented arm is paired with a control that reproduces its side effect
+while adding no information. `duplicate` holds sample size against `uniform`;
+`minority_duplicate` (plain random oversampling) holds class composition
+against `minority`. The two minority arms draw the same source samples from the
+same seed, so the only difference between them is the mask-fill.
 
 Three decisions carry most of the weight, and each exists to stop a specific
 way the result could be an artifact rather than a finding.
@@ -76,7 +84,10 @@ through the loader, not quoted from papers:
 
 | `--dataset` | Train | Test | Classes | Skew | Minority | Character |
 | --- | --- | --- | --- | --- | --- | --- |
-| `phrasebank` | 1,811 | 453 | 3 | 4.6:1 | `negative` (242) | tiny; finance jargon; **non-commercial** |
+| `phrasebank` | 1,811 | 453 | 3 | 4.6:1 | `negative` (242) | tiny; **saturates** (macro-F1 > 0.95) |
+| `phrasebank_75` | 2,763 | 690 | 3 | 5.1:1 | `negative` | |
+| `phrasebank_66` | 3,373 | 844 | 3 | 4.9:1 | `negative` | |
+| `phrasebank_50` | 3,876 | 970 | 3 | 4.8:1 | `negative` | noisiest labels; preferred |
 | `sms_spam` | 4,460 | 1,114 | 2 | 6.5:1 | `spam` (598) | saturates BERT — ceiling control |
 | `trec` | 4,761 | 1,191 | 6 | 14.1:1 | `ABBR` (76) | small, clean, fast |
 | `tweeteval` | 9,576 | 2,394 | 2 | 1.4:1 | `hate` (4,028) | hard but barely skewed |
@@ -84,6 +95,12 @@ through the loader, not quoted from papers:
 | `davidson` | 19,826 | 4,957 | 3 | 13.4:1 | `hate` (1,144) | noisy tweets; **contains slurs** |
 | `goemotions` | 36,358 | 9,088 | 28 | **337:1** | `grief` (38) | most extreme skew here |
 | `agnews` | 102,080 | 25,520 | 4 | 1.0:1 | — | balanced; large |
+
+The four `phrasebank` entries are one corpus at four annotator-agreement
+thresholds, which sweeps **label noise** with domain and skew held roughly
+fixed — useful in its own right, since label noise is what kDN and the
+borderline/rare/outlier split are meant to detect. All four are
+**CC BY-NC-SA 3.0, non-commercial**.
 
 **Which to use.** `sms_spam` is a poor primary choice: BERT reaches macro-F1
 above 0.9 from 400 samples and one epoch, so the baseline saturates and

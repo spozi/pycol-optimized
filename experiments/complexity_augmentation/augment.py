@@ -193,13 +193,26 @@ def build_arm(
 ) -> tuple[list[str], NDArray[np.int64], dict[str, Any]]:
     """Build one experimental arm's training set.
 
-    ``baseline``  the data untouched.
-    ``duplicate`` every text copied verbatim.  Doubles the sample count while
-                  adding no information, which is the control that separates a
-                  genuine complexity change from a sample-size artifact.
-    ``uniform``   one mask-fill copy of every text, as the paper specifies.
-    ``minority``  mask-fill copies of the minority class only, enough to reach
-                  ``target_ratio`` against the majority.
+    ===================  ====================================================
+    ``baseline``         the data untouched
+    ``duplicate``        every text copied verbatim.  Doubles the sample count
+                         while adding no information, which is the control
+                         that separates genuine simplification from a
+                         sample-size artifact
+    ``uniform``          one mask-fill copy of every text, as the paper says
+    ``minority_duplicate``  verbatim copies of the minority class up to
+                         ``target_ratio`` -- classic random oversampling
+    ``minority``         mask-fill copies of the minority class, same target
+    ===================  ====================================================
+
+    The two minority arms draw *the same* source samples from the same seed, so
+    the only difference between them is whether those copies were mask-filled.
+    That is what makes ``minority_duplicate`` a control rather than merely
+    another condition: ``duplicate`` holds sample size fixed for ``uniform``,
+    and this holds class composition fixed for ``minority``.  Rebalancing moves
+    neighbourhood measures on its own -- kDN counts neighbours that disagree, so
+    handing the minority class more same-class neighbours lowers it whether or
+    not the classes became easier to tell apart.
     """
 
     if strategy == "baseline":
@@ -207,6 +220,39 @@ def build_arm(
 
     if strategy == "duplicate":
         return list(texts) * 2, np.concatenate([labels, labels]), {"strategy": strategy}
+
+    if strategy in {"minority", "minority_duplicate"}:
+        minority = np.flatnonzero(labels == minority_label)
+        majority = int((labels != minority_label).sum())
+        wanted = max(0, int(round(majority * target_ratio)) - len(minority))
+        if wanted == 0:
+            return list(texts), labels.copy(), {"strategy": strategy, "n_generated": 0}
+
+        # Drawn before the branch, from a seed both arms share, so the two
+        # differ only in the mask-fill.  With replacement, so a repeated draw
+        # still diverges once masking is applied.
+        picks = np.random.default_rng(seed).choice(minority, size=wanted, replace=True)
+        source = [texts[i] for i in picks]
+
+        if strategy == "minority_duplicate":
+            extra: list[str] = list(source)
+            details: dict[str, Any] = {"strategy": strategy, "n_generated": wanted}
+        else:
+            if augmenter is None:
+                raise ValueError(f"strategy {strategy!r} needs an augmenter")
+            extra, report = augmenter.augment(source, seed=seed)
+            details = {
+                "strategy": strategy,
+                "n_generated": wanted,
+                **report.summary(),
+                "examples": report.examples,
+            }
+
+        return (
+            list(texts) + extra,
+            np.concatenate([labels, np.full(wanted, minority_label, dtype=np.int64)]),
+            details,
+        )
 
     if augmenter is None:
         raise ValueError(f"strategy {strategy!r} needs an augmenter")
@@ -217,28 +263,6 @@ def build_arm(
             list(texts) + extra,
             np.concatenate([labels, labels]),
             {"strategy": strategy, **report.summary(), "examples": report.examples},
-        )
-
-    if strategy == "minority":
-        minority = np.flatnonzero(labels == minority_label)
-        majority = int((labels != minority_label).sum())
-        wanted = max(0, int(round(majority * target_ratio)) - len(minority))
-        if wanted == 0:
-            return list(texts), labels.copy(), {"strategy": strategy, "n_generated": 0}
-
-        # Sample with replacement, so each source text is masked independently
-        # and repeated draws of the same text still diverge.
-        picks = np.random.default_rng(seed).choice(minority, size=wanted, replace=True)
-        extra, report = augmenter.augment([texts[i] for i in picks], seed=seed)
-        return (
-            list(texts) + extra,
-            np.concatenate([labels, np.full(wanted, minority_label, dtype=np.int64)]),
-            {
-                "strategy": strategy,
-                "n_generated": wanted,
-                **report.summary(),
-                "examples": report.examples,
-            },
         )
 
     raise ValueError(f"unknown strategy {strategy!r}")
