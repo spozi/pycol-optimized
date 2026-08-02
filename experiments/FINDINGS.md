@@ -395,11 +395,61 @@ t-SNE and UMAP are visualisation tools. They are appropriate for *looking* at
 what the augmentation did to the embedding space, and inappropriate for
 computing any number reported here.
 
-**Expected outcome of a PCA check:** the artifact result is unchanged by
-construction; kDN and C1 should move little, since they depend on neighbour
-*ranks* which linear projection largely preserves; T1 and the sphere-cover
-measures may move most. It is worth running as a robustness check, not as a
-result in its own right.
+### 7.4 The PCA check, run
+
+`pca_sensitivity.py` recomputes the whole panel across PCA ranks, fitting the
+projection **once on `baseline`** and applying it unchanged to every arm. It
+uses the cached embeddings, so no retraining is involved.
+
+This is a sensitivity sweep, not a search for a best rank. There is no
+objective to optimise: tuning the rank until the conclusion changes would be
+choosing the dimensionality that yields a preferred answer.
+
+| rank | variance | `uniform` beats `duplicate` | `minority` beats `minority_duplicate` |
+| --- | --- | --- | --- |
+| 2 | 15.4% | **0 / 7** | **0 / 7** |
+| 5 | 27.1% | **0 / 7** | **0 / 7** |
+| 10 | 38.8% | **0 / 7** | **0 / 7** |
+| 25 | 55.6% | **0 / 7** | **0 / 7** |
+| 50 | 67.8% | **0 / 7** | **0 / 7** |
+| 100 | 79.8% | **0 / 7** | **0 / 7** |
+| 200 | 90.1% | **0 / 7** | **0 / 7** |
+| 400 | 97.0% | 1 / 7 | 2 / 7 |
+| 768 | 100% | 2 / 7 | 3 / 7 |
+
+**From 2 to 200 dimensions — 15% to 90% of the variance — the result is
+identical.** No rank in that range rescues either treatment. §7.2 is therefore
+answered rather than merely bounded: dimensionality did not produce the null.
+
+### 7.5 A trap: PCA and HEOM interact catastrophically at high rank
+
+The rank-400 and rank-768 rows above are **not** evidence that the finding
+weakens in high dimensions. They are a measurement pathology, and the
+discrepancy that exposes it is worth recording.
+
+Full-rank PCA is a rotation plus a translation, which preserves Euclidean
+distances exactly, so rank 768 should reproduce the raw 768-dimensional numbers.
+It does not — baseline kDN is 0.7272 under full-rank PCA against 0.3694 raw.
+
+The cause is that **HEOM divides each feature by its range**
+(`distance.py`), so it is not rotation-invariant. After that division every
+column carries equal weight whatever its variance:
+
+```text
+raw BERT features,  range ratio max/min:          5.7x
+PCA components,     range ratio max/min:  3,019,430x
+```
+
+At full rank HEOM therefore amplifies the lowest-variance principal component —
+numerical noise — to roughly three million times its natural weight, level with
+PC1. The metric becomes noise-dominated. The distortion is negligible where the
+sweep is informative (1× at rank 2, 3× at rank 50, 8× at rank 200) and explodes
+only past rank ~200.
+
+**Practical consequence for anyone using `pycol-optimized`: do not run PCA at or
+near full rank with the HEOM kernel.** If a high-rank projection is wanted,
+either use the Euclidean kernel, which has no per-feature normalisation, or
+whiten so that the components carry comparable ranges by construction.
 
 ## 8. Scope and limits
 
@@ -407,7 +457,8 @@ One domain (financial sentiment), one mask probability (0.15 of the paper's
 0.10/0.15/0.20), one classifier, 3 classes, 4.77:1 skew.
 
 - **Best supported:** the artifact finding (§3.3, §5). Invariant to linear
-  projection, so §7.2 does not threaten it. Deterministic, no seed
+  projection by construction, and confirmed unchanged across PCA ranks 2-200
+  in §7.4. Deterministic, no seed
   variance, reproduced on four corpora spanning 2/3/6 classes.
 - **Single-corpus, needs replication:** the H1 and H2 rejections. `davidson`
   (13.4:1), `goemotions` (337:1), and the 0.10/0.20 mask probabilities are
