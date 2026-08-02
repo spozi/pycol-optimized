@@ -148,18 +148,60 @@ simply does not make the classes more separable.
 | minority_duplicate | 6,786 | 0.8534 ± 0.0024 | 0.8597 | 0.8711 | 0.849 |
 | **minority** | 6,786 | **0.8278 ± 0.0099** | **0.8078** | **0.9190** | **0.721** |
 
+Spreads above are population standard deviations over five seeds; §3.3 uses
+the sample standard deviation, which is marginally larger.
+
 `uniform`: **−0.0007** against baseline, **−0.0014** against its control. Four
 of five arms lie within 0.0016 of each other while per-arm standard deviations
 are 0.0024–0.0054. With ~14 points of headroom below the ceiling and five seeds,
-this is a genuine null rather than an underpowered result.
+this is a genuine null rather than an underpowered result (§3.3, p = 0.676).
 
-`minority`: **−0.0265**, roughly 5σ. The control isolates the cause —
-`minority_duplicate` reaches the *identical* 1:1 balance from the *identical*
+`minority`: **−0.0255** against its control (t = −5.03, p = 0.0055). The
+control isolates the cause — `minority_duplicate` reaches the *identical* 1:1 balance from the *identical*
 source samples and lands on baseline, so the damage is **not** rebalancing. It
 is the mask-fill corrupting minority-class labels: +4 points of recall bought
 for **−13 points of precision**.
 
-### 3.3 The decisive contrast
+### 3.3 Null hypotheses and tests
+
+The word "null" is used here in two senses that are worth keeping apart. A
+**null control** is a design element — an arm reproducing a treatment's
+sample-level side effect while adding no information. A **null hypothesis** is
+the formal statement a test tries to reject. The first determines the second,
+and that is the whole point of the design:
+
+| Framing | H₀ | Why |
+| --- | --- | --- |
+| Naive | μ(uniform) = μ(baseline) | Rejecting this proves nothing: duplication alone changes sample size and optimizer-step count |
+| **Used here** | μ(uniform) = μ(**duplicate**) | Isolates what the mask-fill contributed over replication |
+
+Welch two-sided t-tests, five seeds per arm:
+
+| H₀ | difference | t | p | Cohen's d | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| μ(uniform) = μ(duplicate) | −0.0014 | −0.43 | **0.676** | −0.27 | fail to reject |
+| μ(minority) = μ(minority_duplicate) | −0.0255 | −5.03 | **0.0055** | −3.18 | **reject**, harmful direction |
+| μ(duplicate) = μ(baseline) | +0.0007 | +0.19 | **0.854** | +0.12 | fail to reject |
+
+Two primary comparisons, so a Bonferroni threshold is α = 0.025; `minority`
+clears it and `uniform` is nowhere near.
+
+**H1 has no null hypothesis, because complexity measures are deterministic.**
+One dataset yields one number, with no sampling distribution and nothing to
+reject. The "0 of 7" counts are direct numerical comparisons rather than
+inference. This cuts both ways: there is no seed noise to contend with, but
+also no interval, and 0.2812 against 0.2715 is reported as a fact rather than
+an estimate. The uncertainty that genuinely exists there concerns the choice of
+embedding space and corpus, which no p-value addresses — §7 covers the former
+and §8 the latter.
+
+**What the tests license.** The seeds are reruns of one procedure on one
+corpus, so the inference is *whether another seed would change the answer*, not
+*whether another corpus would*. p = 0.676 means the `uniform` null is robust to
+seed variation on `phrasebank_50`. It says nothing about `davidson` or
+`goemotions`.
+
+### 3.4 The decisive contrast
 
 | | duplicate | minority (vs its control) |
 | --- | --- | --- |
@@ -456,7 +498,7 @@ whiten so that the components carry comparable ranges by construction.
 One domain (financial sentiment), one mask probability (0.15 of the paper's
 0.10/0.15/0.20), one classifier, 3 classes, 4.77:1 skew.
 
-- **Best supported:** the artifact finding (§3.3, §5). Invariant to linear
+- **Best supported:** the artifact finding (§3.4, §5). Invariant to linear
   projection by construction, and confirmed unchanged across PCA ranks 2-200
   in §7.4. Deterministic, no seed
   variance, reproduced on four corpora spanning 2/3/6 classes.
