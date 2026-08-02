@@ -296,12 +296,118 @@ effects that these measures cannot see.
 
 ---
 
-## 7. Scope and limits
+## 7. Threats to validity
+
+Two properties of the measurement space could weaken the conclusions, and
+neither is fully controlled.
+
+### 7.1 Complexity is measured in a space the classifier does not use
+
+The encoder is frozen precisely to avoid tautology — embedding with the
+fine-tuned classifier would make any complexity drop circular. The cost is that
+fine-tuning *learns its own representation*. Complexity is read in pretrained
+BERT space; classification happens in a space the model reshapes during
+training.
+
+This is the most credible competing explanation for the §3.2 null that is not
+"the measures are artifact-dominated": fine-tuning may simply undo or bypass
+whatever structure the augmentation created in frozen space.
+
+Two things argue it is not the whole story. First, the label-noise contrast
+(§4) shows frozen-space complexity tracking fine-tuned accuracy across a 10.7
+point gap — so the frozen space does carry real signal about achievable
+accuracy. Second, the artifact result does not depend on the choice of space at
+all: duplication collapses N2 to zero in *any* metric space, because the copies
+are at distance zero by construction.
+
+There is no clean fix. Measuring in the fine-tuned space is circular; measuring
+in the frozen space is a proxy. The honest position is that these measures
+describe the data as a *fixed representation* sees it, which is a weaker claim
+than describing the learning problem.
+
+### 7.2 768 dimensions is high for distance-based measures
+
+Distances concentrate as dimensionality grows: beyond roughly 10–15 dimensions
+the nearest and farthest neighbours of a query begin to converge, which erodes
+the very contrasts kDN, N2 and T1 depend on
+[[Beyer et al. 1999]](https://consensus.app/papers/details/e31ec13b3aa95105823b0b752325c6d6/?utm_source=claude_desktop),
+[[Aggarwal et al. 2001]](https://consensus.app/papers/details/22400863605a593198b19b5720b75902/?utm_source=claude_desktop).
+High dimensionality also induces *hubness*, where a few points appear in
+disproportionately many k-nearest-neighbour lists, skewing exactly the
+k-occurrence statistics kDN aggregates
+[[Radovanović et al. 2010]](https://consensus.app/papers/details/cbd6ac0d08ba50dfb454cc505a7314f4/?utm_source=claude_desktop).
+
+Three considerations bound the concern:
+
+1. **Intrinsic, not ambient, dimensionality governs the effect.** Real data
+   typically occupies a manifold of far lower dimension than its coordinates
+   suggest, and that intrinsic figure is what predicts behaviour
+   [[Korn et al. 2001]](https://consensus.app/papers/details/7e703aacc14f52a79877b2ffc191897b/?utm_source=claude_desktop).
+   Distances provably fail to concentrate whenever the number of *relevant*
+   dimensions grows with the ambient count
+   [[Durrant & Kabán 2009]](https://consensus.app/papers/details/23145179359251c88cddf285a94af12b/?utm_source=claude_desktop).
+2. **Text embeddings are empirically resilient.** Nearest-neighbour search over
+   high-dimensional text embeddings degrades markedly less than over random
+   vectors of the same dimension, and remains meaningful in practice
+   [[Chen et al. 2024]](https://consensus.app/papers/details/7c0114488eba5f459707852fc50d22c7/?utm_source=claude_desktop).
+3. **The artifact finding is invariant to any linear projection.** A duplicated
+   row maps to a duplicated row under every linear map, so N2 → 0.0000 and the
+   duplicate signature survive PCA at any rank, by construction.
+
+So dimensionality could in principle affect the *magnitudes* in §3.1 — T1 and
+the sphere measures most, since they depend on absolute radii — but it cannot
+overturn §3.3.
+
+### 7.3 If this is to be checked: PCA, not t-SNE
+
+**PCA fitted once on `baseline` and applied unchanged to every arm** is the
+defensible option. It is linear, deterministic, and has an out-of-sample
+extension, so all arms land in one coordinate system. Fitting separately per
+arm would be an error: the arms would no longer be comparable, which is the
+whole point of the design.
+
+**t-SNE and UMAP are the wrong tool here**, for three independent and
+individually disqualifying reasons:
+
+- **They do not preserve distances.** t-SNE discards large-scale structure by
+  construction
+  [[Zhou et al. 2018]](https://consensus.app/papers/details/1476bbfab20e5eda8691b899c7dbe5ae/?utm_source=claude_desktop)
+  and distorts inter-cluster distances
+  [[Wu et al. 2018]](https://consensus.app/papers/details/64fc663421cd5c258b0bc7be5f4e3d81/?utm_source=claude_desktop);
+  the local/global trade-off is intrinsic to the method family
+  [[Wang et al. 2020]](https://consensus.app/papers/details/191c7af069bb5ab4a81437bc861e5967/?utm_source=claude_desktop).
+  Even work defending these embeddings concedes they "do not preserve
+  high-dimensional distances"
+  [[Lause et al. 2024]](https://consensus.app/papers/details/67ccf180fb17563299602e387fad1166/?utm_source=claude_desktop).
+  N1, N2 and T1 are defined *on distances*; computing them on a t-SNE layout
+  measures the embedding, not the data.
+- **No out-of-sample extension, and non-deterministic.** t-SNE is
+  non-parametric, so two initialisations give two different embeddings
+  [[Candel et al. 2021]](https://consensus.app/papers/details/ad8ee592f0325b4bace82ec6be79048b/?utm_source=claude_desktop).
+  Each arm would receive its own incomparable layout — fatal for a design whose
+  every conclusion is a between-arm comparison.
+- **Results hinge on initialisation.** Whether global structure survives is
+  governed by the initialisation rather than the algorithm
+  [[Kobak & Linderman 2021]](https://consensus.app/papers/details/81bfb91099435f69af85637fc5f4413c/?utm_source=claude_desktop),
+  making any complexity figure a function of a visualisation hyperparameter.
+
+t-SNE and UMAP are visualisation tools. They are appropriate for *looking* at
+what the augmentation did to the embedding space, and inappropriate for
+computing any number reported here.
+
+**Expected outcome of a PCA check:** the artifact result is unchanged by
+construction; kDN and C1 should move little, since they depend on neighbour
+*ranks* which linear projection largely preserves; T1 and the sphere-cover
+measures may move most. It is worth running as a robustness check, not as a
+result in its own right.
+
+## 8. Scope and limits
 
 One domain (financial sentiment), one mask probability (0.15 of the paper's
 0.10/0.15/0.20), one classifier, 3 classes, 4.77:1 skew.
 
-- **Best supported:** the artifact finding (§3.3, §5). Deterministic, no seed
+- **Best supported:** the artifact finding (§3.3, §5). Invariant to linear
+  projection, so §7.2 does not threaten it. Deterministic, no seed
   variance, reproduced on four corpora spanning 2/3/6 classes.
 - **Single-corpus, needs replication:** the H1 and H2 rejections. `davidson`
   (13.4:1), `goemotions` (337:1), and the 0.10/0.20 mask probabilities are
