@@ -3,3 +3,7 @@
 cache/
 results*/
 __pycache__/
+
+# Run logs. Note that `results*/` above matches directories only, so the
+# nohup logs sitting beside them need their own rule.
+*.log
