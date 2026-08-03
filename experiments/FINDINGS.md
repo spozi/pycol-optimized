@@ -1,516 +1,460 @@
-# Does mask-and-fill augmentation work by reducing data complexity?
+# Data-complexity measures respond to resampling, not just to difficulty
 
-Results from `complexity_augmentation`, run on the Financial PhraseBank,
-2026-08-01/02. Every figure here was produced by the code in this directory and
-is reproducible from `results/*/results.json`.
+Two studies run in this directory, on tabular and text data. Every figure comes
+from the code here and is reproducible from `results/`.
 
 ---
 
-## 1. The question
+## The short version
 
-Data augmentation is reported to improve downstream classifiers. A common
-explanation is that it makes the training data *easier* — better separated
-classes, cleaner neighbourhoods, less overlap. Data-complexity measures claim to
-quantify exactly that. So the explanation is testable:
+Data-complexity measures are supposed to tell you how hard a classification
+problem is. They are widely used to check whether a preprocessing method —
+SMOTE, oversampling, undersampling — has made a training set easier: measure
+complexity before, measure it after, and if the number went down, the method
+worked.
 
-> **If augmentation helps by simplifying the data, then a training set that
-> scores lower on data-complexity measures should produce a better classifier.**
+**That check does not work, and this is why.** Every resampling method changes
+two things about a dataset: how many rows it has, and how the classes are
+balanced. These measures respond to both of those *by themselves*, with no
+change in how separable the classes actually are. So a complexity drop after
+resampling might mean the method helped — or it might mean nothing at all.
 
-The augmentation under test is Algorithm 1 of Pozi & Sato (2025), *A
-data-augmented model routing framework for efficient LLM deployment in
-edge–cloud environments*, The Journal of Supercomputing 81:1573
-([doi:10.1007/s11227-025-08034-8](https://doi.org/10.1007/s11227-025-08034-8)):
-tokenize, replace each token with `[MASK]` at probability `p_mask`, fill each
-mask with a masked language model's argmax, append the result to the original
-set.
+To tell those apart you need a **null control**: a second dataset with exactly
+the same number of rows and exactly the same class balance, built by copying
+existing rows at random rather than by any clever method. If the clever method
+does no better than random copying, its complexity drop was not about the
+method.
 
-### Hypotheses
+We ran that comparison. **No method beat its own control.** Random oversampling
+appears to reduce N2 by 0.151 — a large, publishable-looking effect — and beats
+its control by **0.0000**. SMOTE's mixed-type variant does *worse* than random
+copying.
 
-| | Statement |
+But the measures are not broken. When we made the data genuinely harder, by
+flipping a known fraction of labels, they tracked it perfectly (Kendall
+τ = +1.00). So the conclusion is precise:
+
+> **These measures detect genuine difficulty reliably, and cannot tell it apart
+> from a resampling artifact.** Valid, but not robust.
+
+One measure, T1, did something worse than that: it moved in the *wrong*
+direction as the data got genuinely harder. §6 explains exactly why.
+
+---
+
+## 1. Why this needs checking at all
+
+### 1.1 What complexity measures do
+
+Given a labelled dataset, these measures score how tangled the classes are.
+Some common ones, all oriented so **higher means harder**:
+
+| Measure | What it asks |
 | --- | --- |
-| **H1** | Mask-and-fill augmentation reduces measured data complexity. |
-| **H2** | Augmented training sets produce better classifiers. |
-| **H3** | The complexity reduction *explains* the accuracy gain — lower complexity predicts higher accuracy. |
+| **kDN** | Of my 5 nearest neighbours, how many have a different label? |
+| **N2** | How far is my nearest same-class point, relative to my nearest different-class point? |
+| **C1** | An entropy-style summary of neighbourhood label mixing |
+| **T1** | How many hyperspheres does it take to cover the data? |
 
-H3 is the claim of interest. H1 and H2 are its preconditions: if the
-augmentation does not reduce complexity, or does not improve accuracy, H3 has
-nothing to explain.
+They are well validated for comparing **different datasets** — telling you that
+problem A is harder than problem B. That use is supported by studies across
+OpenML, 1,060 binary datasets, and microarray collections.
 
----
+### 1.2 The use that has not been validated
 
-## 2. Methodology
+They are also used to compare **one dataset against itself**, before and after a
+preprocessing step. In the imbalanced-learning literature this is a standard
+way to argue that a resampling method works. One IEEE TKDE paper with 119
+citations tracks complexity changes across 24 datasets after applying SMOTE
+variants; another monitors 22 measures across 20 datasets for the same purpose.
 
-### 2.1 The core problem: complexity measures move for the wrong reasons
+Neither uses a control, and that is the problem.
 
-Complexity measures are computed on a *sample*. Change the sample and they move,
-whether or not the underlying problem got easier. Augmenting at 1× doubles the
-training set, and:
+### 1.3 Why the two uses are not the same
 
-- **kDN, N2, N1** count or measure distances to nearest neighbours. Add copies
-  and every point acquires a near-twin, so neighbourhoods look cleaner.
-- **T1** counts hyperspheres. More points in the same volume means fewer
-  surviving spheres.
-- **F1v, F3** weight class statistics by class size. Change the class balance
-  and they move even if no class's distribution changed at all.
+When you compare two different datasets, their sizes and class balances are
+just facts about them.
 
-A naive before/after comparison therefore cannot distinguish "the data got
-simpler" from "the sample got denser".
+When you resample one dataset, **you change its size and class balance on
+purpose** — that is the entire operation. And these measures are computed from
+a finite sample, not from the underlying distribution, so they move when the
+sample changes even if the problem does not:
 
-### 2.2 The design: every treatment paired with a null control
+- **Neighbourhood measures** (kDN, N2, N1, N3) look at distances to nearest
+  neighbours. Add copies of existing rows and everyone's neighbours get closer.
+- **Geometric measures** (T1 and the sphere family) depend on how densely
+  packed the points are in space.
+- **Feature-based measures** (F1v, F3) weight class statistics by class size, so
+  they shift the moment you rebalance.
 
-Five arms share one fixed test set that is never augmented and never resampled.
-
-| Arm | Training set | Role |
-| --- | --- | --- |
-| `baseline` | original | reference |
-| `duplicate` | original + verbatim copy | **null control for `uniform`** |
-| `uniform` | original + one mask-fill copy of each | Algorithm 1 at 1× |
-| `minority_duplicate` | original + verbatim minority copies to 1:1 | **null control for `minority`** |
-| `minority` | original + mask-fill minority copies to 1:1 | rebalancing |
-
-Each control reproduces its treatment's *sample-level side effect* while adding
-**no information**:
-
-- `duplicate` matches `uniform`'s sample count exactly (7,752 both).
-- `minority_duplicate` matches `minority`'s count and class balance exactly
-  (6,786 both, minority rate 0.5000 both), drawing **the same source samples
-  from the same seed**. The only difference between the pair is whether those
-  copies were mask-filled.
-
-**The decision rule, fixed before results were seen:** a treatment counts as
-reducing complexity only where it beats *its own control*, not where it beats
-`baseline`.
-
-### 2.3 Controls on the measurement itself
-
-**Complexity is measured in a frozen space.** All arms are embedded with the
-same never-updated `bert-base-uncased`, mean-pooled over the last hidden state.
-Embedding with the fine-tuned classifier would make any complexity drop
-tautological — that encoder was optimised to separate exactly these classes, so
-it would report training success, not data difficulty.
-
-**The augmentation is verified to have occurred.** The fill is an argmax, so the
-model may predict back the token it just masked. Measured, not assumed:
-`changed_rate = 0.529` on `uniform`, with 18.4% of texts token-identical to
-their source. The augmentation is real.
-
-**Inference is deterministic.** All inference models run under `eval()` and
-`torch.inference_mode()` with frozen parameters, verified by tests that assert
-embeddings repeat *exactly* — plus a test that puts the encoder back into
-training mode to confirm the check would catch live dropout rather than passing
-vacuously.
-
-### 2.4 Configuration
-
-Corpus `phrasebank_50` (n = 4,846; 3,876 train / 970 test; 3 classes; 4.77:1;
-minority `negative`, 483 training samples). `p_mask = 0.15`.
-Classifier `bert-base-uncased`, 3 epochs, batch 16, lr 2e-5, **5 seeds per
-arm** — 25 fine-tuning runs, 298.6 minutes. Headline metrics are macro-F1 and
-the minority class's own precision/recall/F1, because accuracy is uninformative
-under skew.
+An analogy: measure a crowd's average height, add a hundred copies of the
+tallest person, and conclude the crowd got taller. The number moved. The crowd
+did not change.
 
 ---
 
-## 3. Results
+## 2. The design: every method gets a matched control
 
-### 3.1 Complexity
+We used **UCI Bank Marketing** — 41,188 rows, 19 columns (10 categorical,
+9 numeric), predicting term-deposit subscription. 11.3% positive, a 7.88:1
+imbalance arising from the domain rather than from subsampling. Mixed column
+types are exactly what HEOM, the distance function these measures use, was
+designed for.
 
-Bold marks each treatment's control — the number it must beat.
+### 2.1 The arms
 
-| Measure | baseline | **duplicate** | uniform | **minority_dup** | minority |
+Four resampling methods, each paired with a control:
+
+| Arm | What it does |
+| --- | --- |
+| `baseline` | nothing; the untouched data |
+| `ros` | random oversampling — duplicate minority rows until balanced |
+| `rus` | random undersampling — drop majority rows until balanced |
+| `smotenc` | SMOTE for mixed types — *synthesise* new minority rows by interpolation |
+| `enn` | Edited Nearest Neighbours — remove rows their own neighbours disagree with |
+
+### 2.2 What a control is, exactly
+
+For each method, its control draws rows **at random from the original training
+data** until it reaches *the same count in every class* as the method produced.
+It synthesises nothing and selects nothing cleverly.
+
+So the control has:
+
+- the same number of rows,
+- the same class balance,
+- no new information whatsoever.
+
+**Anything the control does to a complexity measure is what resampling to those
+counts does on its own.** A method has earned a complexity reduction only where
+it beats its control — never where it merely beats `baseline`.
+
+One detail matters. The control is built *from* the method's output rather than
+fixed in advance. Our first attempt used random undersampling as the control
+for ENN, and it did not match: ENN removes however many rows its rule rejects
+(7,501 majority rows, leaving 6.26:1), while random undersampling targets
+balance and lands somewhere else entirely. **A control that does not match is
+not a control.** All four pairs are now verified to match exactly.
+
+### 2.3 Protocol
+
+Stratified 5-fold cross-validation, which is what this literature uses and
+which Bank Marketing needs, having no official split.
+
+**Resampling happens inside each fold, on the training portion only.** This
+matters more than it sounds. Resample *before* splitting and an oversampled
+duplicate of a row can land in training while its twin lands in test — the
+model has effectively seen the answer, and every score inflates. The test fold
+is never resampled and never touched by a sampler.
+
+Complexity is measured per fold too, on the same rows the classifier trains on.
+The classifier is histogram gradient boosting, which takes categorical columns
+natively rather than through an encoding that would invent an ordering.
+
+---
+
+## 3. Result 1: no method beats its control
+
+### 3.1 The two columns that matter
+
+Primary measures were **pre-specified as kDN and N2** before results were seen —
+the two most reported in this literature. Lower is simpler. Averaged over
+5 folds:
+
+| Method | Measure | vs `baseline` | vs **its own control** |
+| --- | --- | --- | --- |
+| `ros` | kDN | **−0.0433** | −0.0022 |
+| `ros` | N2 | **−0.1511** | **+0.0000** |
+| `rus` | kDN | **+0.2072** | +0.0019 |
+| `rus` | N2 | +0.0329 | +0.0004 |
+| `smotenc` | kDN | **−0.0218** | **+0.0193** |
+| `smotenc` | N2 | **−0.1031** | **+0.0480** |
+| `enn` | kDN | −0.0196 | −0.0456 |
+| `enn` | N2 | −0.0053 | −0.0117 |
+
+**Read the two right-hand columns against each other.** That contrast is the
+entire finding.
+
+- **`ros` against baseline** reduces N2 by 0.151 — a big number, exactly the
+  sort reported as evidence a method works. Against a control that just copies
+  rows at random, its advantage is **+0.0000**. Every bit of it was the
+  resampling.
+- **`rus` against baseline** raises kDN by 0.207, appearing to make the data
+  more than twice as hard. Against its control: **+0.0019**. Again, essentially
+  all of it is the class balance changing, not the data.
+- **`smotenc`** is the interesting one. Against baseline it reduces kDN by
+  0.022 and N2 by 0.103, and looks effective. Against its control both flip
+  sign: **+0.019 and +0.048**. Interpolating new points makes the data
+  measurably *harder* than simply copying existing ones — consistently, with a
+  fold-to-fold standard deviation of 0.0011 on a difference of 0.0193.
+
+### 3.2 Full picture
+
+| arm | n | kDN | N2 | C1 | T1 | macro-F1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline | 32,950 | 0.1546 | 0.4497 | 0.1536 | 0.9501 | 0.6564 ± 0.0074 |
+| ros | 58,476 | 0.1113 | 0.2986 | 0.0835 | 0.5354 | 0.6906 ± 0.0041 |
+| ros_control | 58,476 | 0.1135 | 0.2985 | 0.0811 | 0.5355 | 0.6910 ± 0.0058 |
+| rus | 7,424 | 0.3617 | 0.4825 | 0.3601 | 0.9853 | 0.6694 ± 0.0053 |
+| rus_control | 7,424 | 0.3598 | 0.4821 | 0.3569 | 0.9848 | 0.6691 ± 0.0049 |
+| smotenc | 58,476 | 0.1328 | 0.3466 | 0.1185 | 0.7101 | 0.7013 ± 0.0040 |
+| smotenc_control | 58,476 | 0.1135 | 0.2985 | 0.0811 | 0.5355 | 0.6910 ± 0.0058 |
+| enn | 26,902 | 0.1349 | 0.4444 | 0.1282 | 0.9544 | 0.7145 ± 0.0064 |
+| enn_control | 26,902 | 0.1805 | 0.4561 | 0.1791 | 0.9576 | 0.6769 ± 0.0098 |
+
+Notice `ros` and `ros_control` agree to three decimal places on everything.
+They should: random oversampling *is* its own control, so this is the machinery
+verifying itself.
+
+### 3.3 Downstream accuracy
+
+| Method | vs `baseline` | vs **its control** | effect size |
+| --- | --- | --- | --- |
+| `ros` | +0.0342 | −0.0004 | −0.1 |
+| `rus` | +0.0130 | +0.0004 | +0.1 |
+| `smotenc` | +0.0449 | **+0.0103** | 2.3 |
+| `enn` | +0.0580 | **+0.0376** | 6.0 |
+
+The same pattern. `ros` gains 0.034 macro-F1 over baseline and **nothing** over
+random copying — its benefit is having more minority rows, however you get them.
+
+SMOTENC and ENN *do* beat their controls on accuracy. SMOTENC's case is the
+sharpest dissociation in the study: it makes the data **measurably harder** by
+every complexity measure and **classifies better anyway**. Whatever it does for
+the classifier, the complexity panel cannot see it.
+
+### 3.4 What happens underneath
+
+Minority-class precision and recall show the actual mechanism:
+
+| arm | minority F1 | recall | precision |
+| --- | --- | --- | --- |
+| baseline | 0.3668 | 0.2554 | 0.6512 |
+| ros | 0.4729 | 0.6218 | 0.3816 |
+| smotenc | 0.4688 | 0.4610 | 0.4772 |
+| enn | 0.4986 | 0.5399 | 0.4632 |
+
+Every method trades precision for recall. Baseline catches only 25.5% of
+positives but is right 65% of the time it fires; `ros` catches 62% at 38%
+precision. This trade is what resampling is *for*, and **no complexity measure
+in the panel can see it**, because it is a property of where the decision
+threshold ends up, not of how the points sit in space.
+
+---
+
+## 4. Result 2: the measures work when the difficulty is real
+
+If methods never beat controls, one explanation is that these measures simply
+do not work. So we tested that directly.
+
+We flipped a known fraction of training labels at random. This raises the Bayes
+error — the error no classifier can avoid — by a controlled amount, while
+leaving the features, the sample size, and very nearly the class balance
+untouched. **That is what makes it genuine where resampling is not.**
+
+| noise | kDN | N2 | C1 | T1 | macro-F1 |
 | --- | --- | --- | --- | --- | --- |
-| kDN | 0.3694 | **0.2715** | 0.2812 | **0.2180** | 0.2295 |
-| C1 | 0.3512 | **0.1817** | 0.1883 | **0.1868** | 0.2036 |
-| C2 | 0.9947 | **0.5390** | 0.8630 | **0.5064** | 0.8595 |
-| N2 | 0.4810 | **0.0000** | 0.2464 | **0.3358** | 0.3901 |
-| T1 | 0.9979 | **0.4990** | 0.9043 | **0.5700** | 0.9207 |
-| borderline | 0.3945 | **0.3455** | 0.3327 | **0.1640** | 0.1823 |
-| F1v | 0.0719 | 0.0719 | *0.0838* | 0.0633 | *0.0789* |
+| 0% | 0.1546 | 0.4497 | 0.1536 | 0.9501 | 0.6564 |
+| 2% | 0.1818 | 0.4564 | 0.1810 | 0.9488 | 0.6575 |
+| 5% | 0.2201 | 0.4643 | 0.2192 | 0.9475 | 0.6535 |
+| 10% | 0.2792 | 0.4742 | 0.2788 | 0.9440 | 0.6451 |
+| 20% | 0.3764 | 0.4867 | 0.3759 | 0.9375 | 0.6424 |
 
-> **`uniform` beats `duplicate` on 0 of 7. `minority` beats `minority_duplicate`
-> on 0 of 7.**
+| measure | Kendall τ vs noise |
+| --- | --- |
+| kDN | **+1.00** |
+| N2 | **+1.00** |
+| C1 | **+1.00** |
+| T1 | **−1.00** |
+| macro-F1 | −0.80 (manipulation check) |
 
-Against `baseline` alone, `uniform` improves kDN by 24% and looks effective.
-Verbatim copying improves it by 26.5% — more, on every measure.
+kDN, N2, and C1 rise **perfectly monotonically** with injected noise. Accuracy
+falls, confirming the axis really did make the problem harder.
 
-The single exception is **F1v**, which moves only for the mask-fill arms:
-+16.5% for `uniform` over `duplicate`, +24.7% for `minority` over its control.
-The augmentation *does* change the class-conditional feature distribution. It
-simply does not make the classes more separable.
-
-### 3.2 Classification
-
-| Arm | n | macro-F1 | minority-F1 | min-recall | min-precision |
-| --- | --- | --- | --- | --- | --- |
-| baseline | 3,876 | 0.8544 ± 0.0054 | 0.8648 | 0.8777 | 0.853 |
-| duplicate | 7,752 | 0.8550 ± 0.0048 | 0.8623 | 0.8595 | 0.866 |
-| uniform | 7,752 | 0.8536 ± 0.0044 | 0.8576 | 0.8512 | 0.865 |
-| minority_duplicate | 6,786 | 0.8534 ± 0.0024 | 0.8597 | 0.8711 | 0.849 |
-| **minority** | 6,786 | **0.8278 ± 0.0099** | **0.8078** | **0.9190** | **0.721** |
-
-Spreads above are population standard deviations over five seeds; §3.3 uses
-the sample standard deviation, which is marginally larger.
-
-`uniform`: **−0.0007** against baseline, **−0.0014** against its control. Four
-of five arms lie within 0.0016 of each other while per-arm standard deviations
-are 0.0024–0.0054. With ~14 points of headroom below the ceiling and five seeds,
-this is a genuine null rather than an underpowered result (§3.3, p = 0.676).
-
-`minority`: **−0.0255** against its control (t = −5.03, p = 0.0055). The
-control isolates the cause — `minority_duplicate` reaches the *identical* 1:1 balance from the *identical*
-source samples and lands on baseline, so the damage is **not** rebalancing. It
-is the mask-fill corrupting minority-class labels: +4 points of recall bought
-for **−13 points of precision**.
-
-### 3.3 Null hypotheses and tests
-
-The word "null" is used here in two senses that are worth keeping apart. A
-**null control** is a design element — an arm reproducing a treatment's
-sample-level side effect while adding no information. A **null hypothesis** is
-the formal statement a test tries to reject. The first determines the second,
-and that is the whole point of the design:
-
-| Framing | H₀ | Why |
-| --- | --- | --- |
-| Naive | μ(uniform) = μ(baseline) | Rejecting this proves nothing: duplication alone changes sample size and optimizer-step count |
-| **Used here** | μ(uniform) = μ(**duplicate**) | Isolates what the mask-fill contributed over replication |
-
-Welch two-sided t-tests, five seeds per arm:
-
-| H₀ | difference | t | p | Cohen's d | Outcome |
-| --- | --- | --- | --- | --- | --- |
-| μ(uniform) = μ(duplicate) | −0.0014 | −0.43 | **0.676** | −0.27 | fail to reject |
-| μ(minority) = μ(minority_duplicate) | −0.0255 | −5.03 | **0.0055** | −3.18 | **reject**, harmful direction |
-| μ(duplicate) = μ(baseline) | +0.0007 | +0.19 | **0.854** | +0.12 | fail to reject |
-
-Two primary comparisons, so a Bonferroni threshold is α = 0.025; `minority`
-clears it and `uniform` is nowhere near.
-
-**H1 has no null hypothesis, because complexity measures are deterministic.**
-One dataset yields one number, with no sampling distribution and nothing to
-reject. The "0 of 7" counts are direct numerical comparisons rather than
-inference. This cuts both ways: there is no seed noise to contend with, but
-also no interval, and 0.2812 against 0.2715 is reported as a fact rather than
-an estimate. The uncertainty that genuinely exists there concerns the choice of
-embedding space and corpus, which no p-value addresses — §7 covers the former
-and §8 the latter.
-
-**What the tests license.** The seeds are reruns of one procedure on one
-corpus, so the inference is *whether another seed would change the answer*, not
-*whether another corpus would*. p = 0.676 means the `uniform` null is robust to
-seed variation on `phrasebank_50`. It says nothing about `davidson` or
-`goemotions`.
-
-### 3.4 The decisive contrast
-
-| | duplicate | minority (vs its control) |
-| --- | --- | --- |
-| Complexity change | N2 → 0.0000, T1 halved, kDN −26.5% | worse on all 7 |
-| Information added | **none** | mask-filled text |
-| Accuracy effect | **+0.0006** | **−0.0255** |
-
-The largest measured simplification in the entire study came from copying rows,
-and changed downstream accuracy by six ten-thousandths.
+**So the measures are not broken.** They detect genuine difficulty flawlessly.
+They just cannot distinguish it from having resampled the data.
 
 ---
 
-## 4. Verdict on each hypothesis
+## 5. The combined claim
 
-### H1 — augmentation reduces complexity: **rejected**
-
-0 of 7 measures beaten by either treatment against its own control. Replicated
-on `phrasebank` (unanimous labels) and `phrasebank_50` (bare-majority labels);
-the `duplicate` signature reproduces on SMS Spam and TREC as well, across 2, 3
-and 6 classes.
-
-### H2 — augmentation improves the classifier: **rejected**
-
-`uniform` −0.0014 against its control, indistinguishable from zero. `minority`
-−0.0255, significantly *worse*.
-
-### H3 — complexity explains accuracy: **not testable as designed, and the design was the finding**
-
-H3 could not be evaluated, because **no arm delivered a genuine complexity
-reduction to test with.** Every arm whose numbers fell got there by artifact.
-The experiment answered a different and more useful question: *can these
-measures tell a real simplification from a sample-level artifact?* They cannot.
-
-### Where the hypothesis *is* supported
-
-The same data contains a clean natural experiment in the opposite direction.
-The PhraseBank ships at four annotator-agreement thresholds — the same corpus,
-domain and skew, differing only in label noise. Two were run:
-
-| | `phrasebank` (unanimous) | `phrasebank_50` (bare majority) |
+| | Needed | Observed |
 | --- | --- | --- |
-| kDN | 0.2711 | **0.3694** (+36%) |
-| C1 | 0.2525 | 0.3512 |
-| borderline | 0.2938 | 0.3945 |
-| safe | 0.6052 | 0.4515 |
-| **baseline macro-F1** | **0.9616 ± 0.0036** | **0.8544 ± 0.0054** |
+| Methods do **not** beat their controls | ✔ | 0 of 4 on both primary measures |
+| Measures **do** track genuine difficulty | ✔ | τ = +1.00 for kDN, N2, C1 |
 
-Complexity up 36%; accuracy down **10.7 points**, about 20σ. Every measure moved
-in the predicted direction and the classifier followed.
+> **Valid, but not robust.**
 
-**So complexity does predict accuracy — when the complexity difference is
-genuine.** The measures are not broken. They are not *robust*.
+Had only the first held, the honest reading would be "these measures don't
+work" — weaker, and as §4 shows, wrong.
 
 ---
 
-## 5. What "genuine" means
+## 6. T1 moves the wrong way, and here is why
 
-This is the distinction the whole study turns on, so it is worth stating
-precisely.
+T1 counts how many hyperspheres it takes to cover the data, divided by the
+sample count. More spheres means less structure, so **higher should mean
+harder**.
 
-A complexity measure is meant to estimate how hard the classification problem
-is — a property of the joint distribution `P(x, y)`. But it is computed from a
-*sample*. That gap is where the trouble lives.
+It fell steadily as we injected label noise: 0.9501 → 0.9375, τ = **−1.00**.
+Perfectly monotone in the wrong direction. That is not noise, so we traced it.
 
-> **A complexity change is *genuine* if it reflects a change in how separable
-> the classes actually are.**
-> **It is an *artifact* if it reflects a change in the sample's density or
-> composition while separability is untouched.**
+Each point's sphere grows until it reaches the nearest point of another class.
+Flip a label and some point suddenly has an opposite-class point sitting right
+next to it, so its sphere shrinks to almost nothing. Measured on a 12,000-row
+subsample:
+
+| noise | median radius | spheres under 1% of max | absorbed |
+| --- | --- | --- | --- |
+| 0% | 1.4142 | 0.4% | 243 |
+| 20% | 1.0249 | **1.5%** | **289** |
+
+A sphere is absorbed by another when `distance ≤ r_outer − r_inner`. When
+`r_inner` is nearly zero that condition is trivially satisfied — **a tiny sphere
+gets swallowed by anything near it**. So label noise creates many tiny spheres,
+tiny spheres get absorbed, fewer survive, and T1 falls.
+
+The mechanism is real and the implementation is correct. But the consequence is
+that **T1 reads label noise as simplification**, the opposite of what a
+complexity measure should do. On this evidence T1 should not be used where label
+noise is plausible — which is most real datasets.
+
+---
+
+## 7. Supporting evidence: the same effect on text
+
+Before the tabular work we ran the same design on text, with mask-and-fill
+augmentation (Pozi & Sato 2025) on the Financial PhraseBank, 5 arms × 5 seeds.
+
+- Augmentation beat its controls on **0 of 7** measures.
+- Downstream accuracy: **−0.0014** against control, p = 0.676.
+- Minority-class augmentation *hurt* — −0.0255, p = 0.0055 — and the control
+  isolated why: rebalancing was fine, but the mask-fill corrupted minority
+  labels, buying +4 points of recall for −13 of precision.
+- **Verbatim duplication produced the single largest complexity reduction in
+  the whole project** — N2 to exactly 0.0000, T1 exactly halved, kDN −26.5% —
+  while adding provably no information, and changed accuracy by **+0.0006**
+  (p = 0.854).
+
+Two corpora, two domains, two representations, same conclusion.
+
+### 7.1 A dose-response
+
+Bank Marketing carries **3,731 exact duplicate rows (9.06%)** as distributed.
+Removing them — against a control that removes the same number at random —
+moves N2 by +0.015 and T1 by +0.056, while kDN barely moves at all.
+
+| duplication | N2 | T1 |
+| --- | --- | --- |
+| 9% (natural) | +3% | +6% |
+| 100% (constructed) | → exactly 0.0000 | halved |
+
+The artifact scales with the perturbation. That is stronger evidence than
+either point alone.
+
+### 7.2 Contradicted labels in a standard benchmark
+
+237 of those duplicate groups carry **conflicting labels** — 542 rows share a
+feature vector with a row labelled differently. No classifier can be right
+about both. That is directly measurable irreducible error sitting in a widely
+used benchmark, computable in seconds, and as far as we have found nobody
+reports it. Deduplication silently picks a winner.
+
+---
+
+## 8. What "genuine" means
+
+The distinction the whole project turns on:
+
+> A complexity change is **genuine** if it reflects a change in how separable
+> the classes actually are.
+> It is an **artifact** if it reflects a change in the sample's density or class
+> prior while separability is untouched.
 
 | | Genuine | Artifact |
 | --- | --- | --- |
-| What changed | `P(y\|x)` — how distinguishable the classes are | the sample's size, density, or class prior |
+| What changed | how distinguishable the classes are | the sample's size or class prior |
 | Bayes error | moves | unchanged |
 | Best achievable accuracy | moves | unchanged |
-| Example here | label noise: unanimous → bare-majority labels | duplication; rebalancing; adding near-copies |
-| Accuracy effect | **−10.7 points** | **+0.0006** |
+| Example | label noise | duplication; rebalancing; interpolation |
+| Effect on accuracy | **−0.014 macro-F1 at 20% noise** | **+0.0000 for `ros` vs control** |
 
-**Why duplication is an artifact.** Copying every row leaves the empirical
-distribution identical — same means, same variances, same class-conditional
-densities. Nothing about the problem changed. But kDN asks "how many of my five
-nearest neighbours disagree with me?", and after duplication every point has a
-twin at distance zero that always agrees. The statistic collapses while the
-problem is untouched. N2 → 0.0000 is this in its purest form: nearest same-class
-distance is now zero for every sample.
+**Why duplication is an artifact.** Copying rows leaves the distribution
+identical — same means, same variances, same class-conditional densities. But
+kDN asks "do my 5 nearest neighbours agree?", and a duplicate is a neighbour at
+distance zero that always agrees. The statistic moves; the problem does not.
 
-**Why rebalancing is an artifact.** Oversampling the minority class changes
-`P(y)`, not `P(x|y)`. The classes are exactly as distinguishable as before. But
-kDN improves because minority points now have more same-class neighbours to
-find, and F1v shifts because it weights its scatter matrix by class size. The
-test set keeps the original prior, so relative to the actual task nothing was
-simplified — only the training set's composition changed.
+**Why rebalancing is an artifact.** Oversampling changes `P(y)`, not `P(x|y)`.
+The classes are exactly as distinguishable as before. kDN improves because
+minority points now have more same-class neighbours available, and the test set
+keeps the original prior, so relative to the actual task nothing was simplified.
 
-**Why label noise is genuine.** Moving from unanimous to bare-majority labels
-means samples whose true class is genuinely ambiguous now carry confident
-labels. `P(y|x)` really is noisier, the Bayes error really is higher, and no
-model can recover the lost information. The measures register it and accuracy
-falls accordingly.
+**Why label noise is genuine.** Samples whose true class is ambiguous now carry
+confident labels. `P(y|x)` really is noisier, the Bayes error really is higher,
+and no model can recover the lost information.
 
 ### The operational test
 
-The definition above is not directly observable, but it has a practical proxy —
-the one this study is built on:
-
-> **Construct a null control that reproduces the treatment's sample-level side
+> **Build a null control that reproduces the intervention's sample-level side
 > effect while adding no information. If the measure moves as much for the null
-> as for the treatment, the movement is an artifact.**
-
-`duplicate` is that null for sample size. `minority_duplicate` is that null for
-class composition. Neither is a competing method; both exist to be subtracted.
+> as for the intervention, the movement is an artifact.**
 
 ---
 
-## 6. Consequences
+## 9. Consequences
 
-**For anyone using these measures to evaluate resampling or augmentation.** A
-before/after complexity comparison in which `n` or the class balance changes is
-uninterpretable without a matched null control. This applies to SMOTE, random
-over/under-sampling, and every text-augmentation method — not only to the one
-tested here.
+**If you compare complexity before and after resampling, you need a control.**
+This applies to SMOTE and its variants, random over- and undersampling,
+instance selection, and text augmentation. Without one, the comparison cannot
+distinguish a better dataset from a bigger or more balanced one.
 
-**A correction worth recording.** Mid-study it appeared that the feature-based
-measures (F1, F1v, F2, F3) were the artifact-proof subset, since `duplicate`
-left them bit-identical. `minority_duplicate` disproved it: F1v moved
-0.0719 → 0.0633 on rebalancing alone. They are robust to **sample size**, not to
-**class composition**.
+**The control is cheap.** Reproduce the method's per-class counts by drawing
+rows at random from the original data. It costs one extra complexity
+computation and no modelling.
 
-**What the study does not claim.** It does not refute the source paper. That
-paper tested whether augmentation improves a *router* on *code prompts* using
-GraphCodeBERT, and reported +2–3 points. This tests a proposed *explanation* for
-such gains, on financial sentiment with `bert-base-uncased`. The explanation
-finds no support and the benefit does not transfer to this domain. Both can hold
-at once: augmentation may help through regularisation or decision-boundary
-effects that these measures cannot see.
+**Report the duplicate count.** `pycol-optimized` already emits
+`duplicate_row_count` in its diagnostics. A nonzero value means the
+distance-based measures are partly reading density. Bank Marketing sits at
+9.06% before anyone touches it.
+
+**Two corrections we had to make ourselves, recorded so others need not.**
+
+1. We first believed the feature-based measures (F1, F1v, F2, F3) were the
+   artifact-proof subset, since verbatim duplication left them bit-identical.
+   The composition control disproved it: F1v moved 0.0719 → 0.0633 under
+   rebalancing alone. They are robust to **sample size**, not to **class
+   composition**.
+2. We first used random undersampling as ENN's control. It did not match ENN's
+   class counts, and an unmatched control is not a control.
 
 ---
 
-## 7. Threats to validity
+## 10. Limitations
 
-Two properties of the measurement space could weaken the conclusions, and
-neither is fully controlled.
+**One tabular dataset.** Bank Marketing only. The text results show the effect
+is not domain-specific, but a KEEL sweep is the obvious next step, and KEEL is
+the benchmark suite this literature actually uses.
 
-### 7.1 Complexity is measured in a space the classifier does not use
+**Cross-validation folds are not independent.** Any two training folds share
+3/5 of their rows, so paired tests across them understate variance. We therefore
+report **paired differences and effect sizes**, and treat p-values as
+indicative. With 5 folds a one-sided Wilcoxon bottoms out at p = 0.031 anyway.
 
-The encoder is frozen precisely to avoid tautology — embedding with the
-fine-tuned classifier would make any complexity drop circular. The cost is that
-fine-tuning *learns its own representation*. Complexity is read in pretrained
-BERT space; classification happens in a space the model reshapes during
-training.
+**Multiplicity.** Four methods against roughly eleven measures is 44 tests.
+kDN and N2 were pre-specified as primary; everything else is descriptive.
 
-This is the most credible competing explanation for the §3.2 null that is not
-"the measures are artifact-dominated": fine-tuning may simply undo or bypass
-whatever structure the augmentation created in frozen space.
+**ENN's complexity win is close to circular.** ENN removes points that their own
+*k* nearest neighbours misclassify, which is very nearly the definition of kDN.
+"ENN reduces kDN" is largely ENN doing what it says it does. Its **accuracy**
+gain of +0.0376 over control is the part that is not circular, and the part
+worth reporting.
 
-Two things argue it is not the whole story. First, the label-noise contrast
-(§4) shows frozen-space complexity tracking fine-tuned accuracy across a 10.7
-point gap — so the frozen space does carry real signal about achievable
-accuracy. Second, the artifact result does not depend on the choice of space at
-all: duplication collapses N2 to zero in *any* metric space, because the copies
-are at distance zero by construction.
+**One classifier.** Histogram gradient boosting. A distance-based classifier
+such as k-NN might track these measures far more closely, since they are built
+from the same neighbourhood structure — a genuinely open question, and a
+plausible partial explanation for the dissociation.
 
-There is no clean fix. Measuring in the fine-tuned space is circular; measuring
-in the frozen space is a proxy. The honest position is that these measures
-describe the data as a *fixed representation* sees it, which is a weaker claim
-than describing the learning problem.
-
-### 7.2 768 dimensions is high for distance-based measures
-
-Distances concentrate as dimensionality grows: beyond roughly 10–15 dimensions
-the nearest and farthest neighbours of a query begin to converge, which erodes
-the very contrasts kDN, N2 and T1 depend on
-[[Beyer et al. 1999]](https://consensus.app/papers/details/e31ec13b3aa95105823b0b752325c6d6/?utm_source=claude_desktop),
-[[Aggarwal et al. 2001]](https://consensus.app/papers/details/22400863605a593198b19b5720b75902/?utm_source=claude_desktop).
-High dimensionality also induces *hubness*, where a few points appear in
-disproportionately many k-nearest-neighbour lists, skewing exactly the
-k-occurrence statistics kDN aggregates
-[[Radovanović et al. 2010]](https://consensus.app/papers/details/cbd6ac0d08ba50dfb454cc505a7314f4/?utm_source=claude_desktop).
-
-Three considerations bound the concern:
-
-1. **Intrinsic, not ambient, dimensionality governs the effect.** Real data
-   typically occupies a manifold of far lower dimension than its coordinates
-   suggest, and that intrinsic figure is what predicts behaviour
-   [[Korn et al. 2001]](https://consensus.app/papers/details/7e703aacc14f52a79877b2ffc191897b/?utm_source=claude_desktop).
-   Distances provably fail to concentrate whenever the number of *relevant*
-   dimensions grows with the ambient count
-   [[Durrant & Kabán 2009]](https://consensus.app/papers/details/23145179359251c88cddf285a94af12b/?utm_source=claude_desktop).
-2. **Text embeddings are empirically resilient.** Nearest-neighbour search over
-   high-dimensional text embeddings degrades markedly less than over random
-   vectors of the same dimension, and remains meaningful in practice
-   [[Chen et al. 2024]](https://consensus.app/papers/details/7c0114488eba5f459707852fc50d22c7/?utm_source=claude_desktop).
-3. **The artifact finding is invariant to any linear projection.** A duplicated
-   row maps to a duplicated row under every linear map, so N2 → 0.0000 and the
-   duplicate signature survive PCA at any rank, by construction.
-
-So dimensionality could in principle affect the *magnitudes* in §3.1 — T1 and
-the sphere measures most, since they depend on absolute radii — but it cannot
-overturn §3.3.
-
-### 7.3 If this is to be checked: PCA, not t-SNE
-
-**PCA fitted once on `baseline` and applied unchanged to every arm** is the
-defensible option. It is linear, deterministic, and has an out-of-sample
-extension, so all arms land in one coordinate system. Fitting separately per
-arm would be an error: the arms would no longer be comparable, which is the
-whole point of the design.
-
-**t-SNE and UMAP are the wrong tool here**, for three independent and
-individually disqualifying reasons:
-
-- **They do not preserve distances.** t-SNE discards large-scale structure by
-  construction
-  [[Zhou et al. 2018]](https://consensus.app/papers/details/1476bbfab20e5eda8691b899c7dbe5ae/?utm_source=claude_desktop)
-  and distorts inter-cluster distances
-  [[Wu et al. 2018]](https://consensus.app/papers/details/64fc663421cd5c258b0bc7be5f4e3d81/?utm_source=claude_desktop);
-  the local/global trade-off is intrinsic to the method family
-  [[Wang et al. 2020]](https://consensus.app/papers/details/191c7af069bb5ab4a81437bc861e5967/?utm_source=claude_desktop).
-  Even work defending these embeddings concedes they "do not preserve
-  high-dimensional distances"
-  [[Lause et al. 2024]](https://consensus.app/papers/details/67ccf180fb17563299602e387fad1166/?utm_source=claude_desktop).
-  N1, N2 and T1 are defined *on distances*; computing them on a t-SNE layout
-  measures the embedding, not the data.
-- **No out-of-sample extension, and non-deterministic.** t-SNE is
-  non-parametric, so two initialisations give two different embeddings
-  [[Candel et al. 2021]](https://consensus.app/papers/details/ad8ee592f0325b4bace82ec6be79048b/?utm_source=claude_desktop).
-  Each arm would receive its own incomparable layout — fatal for a design whose
-  every conclusion is a between-arm comparison.
-- **Results hinge on initialisation.** Whether global structure survives is
-  governed by the initialisation rather than the algorithm
-  [[Kobak & Linderman 2021]](https://consensus.app/papers/details/81bfb91099435f69af85637fc5f4413c/?utm_source=claude_desktop),
-  making any complexity figure a function of a visualisation hyperparameter.
-
-t-SNE and UMAP are visualisation tools. They are appropriate for *looking* at
-what the augmentation did to the embedding space, and inappropriate for
-computing any number reported here.
-
-### 7.4 The PCA check, run
-
-`pca_sensitivity.py` recomputes the whole panel across PCA ranks, fitting the
-projection **once on `baseline`** and applying it unchanged to every arm. It
-uses the cached embeddings, so no retraining is involved.
-
-This is a sensitivity sweep, not a search for a best rank. There is no
-objective to optimise: tuning the rank until the conclusion changes would be
-choosing the dimensionality that yields a preferred answer.
-
-| rank | variance | `uniform` beats `duplicate` | `minority` beats `minority_duplicate` |
-| --- | --- | --- | --- |
-| 2 | 15.4% | **0 / 7** | **0 / 7** |
-| 5 | 27.1% | **0 / 7** | **0 / 7** |
-| 10 | 38.8% | **0 / 7** | **0 / 7** |
-| 25 | 55.6% | **0 / 7** | **0 / 7** |
-| 50 | 67.8% | **0 / 7** | **0 / 7** |
-| 100 | 79.8% | **0 / 7** | **0 / 7** |
-| 200 | 90.1% | **0 / 7** | **0 / 7** |
-| 400 | 97.0% | 1 / 7 | 2 / 7 |
-| 768 | 100% | 2 / 7 | 3 / 7 |
-
-**From 2 to 200 dimensions — 15% to 90% of the variance — the result is
-identical.** No rank in that range rescues either treatment. §7.2 is therefore
-answered rather than merely bounded: dimensionality did not produce the null.
-
-### 7.5 A trap: PCA and HEOM interact catastrophically at high rank
-
-The rank-400 and rank-768 rows above are **not** evidence that the finding
-weakens in high dimensions. They are a measurement pathology, and the
-discrepancy that exposes it is worth recording.
-
-Full-rank PCA is a rotation plus a translation, which preserves Euclidean
-distances exactly, so rank 768 should reproduce the raw 768-dimensional numbers.
-It does not — baseline kDN is 0.7272 under full-rank PCA against 0.3694 raw.
-
-The cause is that **HEOM divides each feature by its range**
-(`distance.py`), so it is not rotation-invariant. After that division every
-column carries equal weight whatever its variance:
-
-```text
-raw BERT features,  range ratio max/min:          5.7x
-PCA components,     range ratio max/min:  3,019,430x
-```
-
-At full rank HEOM therefore amplifies the lowest-variance principal component —
-numerical noise — to roughly three million times its natural weight, level with
-PC1. The metric becomes noise-dominated. The distortion is negligible where the
-sweep is informative (1× at rank 2, 3× at rank 50, 8× at rank 200) and explodes
-only past rank ~200.
-
-**Practical consequence for anyone using `pycol-optimized`: do not run PCA at or
-near full rank with the HEOM kernel.** If a high-rank projection is wanted,
-either use the Euclidean kernel, which has no per-feature normalisation, or
-whiten so that the components carry comparable ranges by construction.
-
-## 8. Scope and limits
-
-One domain (financial sentiment), one mask probability (0.15 of the paper's
-0.10/0.15/0.20), one classifier, 3 classes, 4.77:1 skew.
-
-- **Best supported:** the artifact finding (§3.4, §5). Invariant to linear
-  projection by construction, and confirmed unchanged across PCA ranks 2-200
-  in §7.4. Deterministic, no seed
-  variance, reproduced on four corpora spanning 2/3/6 classes.
-- **Single-corpus, needs replication:** the H1 and H2 rejections. `davidson`
-  (13.4:1), `goemotions` (337:1), and the 0.10/0.20 mask probabilities are
-  wired and unrun.
-- **Not yet run:** the direct test of H3. The four agreement thresholds form a
-  genuine complexity axis with domain and skew fixed. Running `baseline` alone
-  at each — four datasets, five seeds, no mask-fill pass — and correlating kDN
-  against macro-F1 across the four points would establish whether these measures
-  predict accuracy when the underlying difference is real. Two of the four
-  points already exist and lie on a steep line.
+---
 
 ## Reproducing
 
@@ -518,12 +462,17 @@ One domain (financial sentiment), one mask probability (0.15 of the paper's
 cd experiments
 pip install -r requirements.txt && pip install -e ..
 
-python -m complexity_augmentation.run \
-  --dataset phrasebank_50 --mask-prob 0.15 --seeds 0 1 2 3 4
+# tabular: 5 folds x 9 conditions, plus the label-noise sweep (~72 min)
+python -m tabular.run --folds 5
+
+# the duplicates already in the file, against a random-removal control
+python -m tabular.dedup_study
+
+# text (~5 hours; needs transformers)
+python -m complexity_augmentation.run --dataset phrasebank_50 --seeds 0 1 2 3 4
 ```
 
-Raw output: `results/phrasebank50_p015/results.json` (full run) and
-`results/phrasebank_p015/results.json` (the unanimous-label corpus).
+Raw output in `results/tabular/` and `results/phrasebank50_p015/`.
 
-The PhraseBank is licensed **CC BY-NC-SA 3.0, non-commercial**; the authors ask
-to be contacted for commercial use.
+Bank Marketing is CC BY 4.0 (UCI). The Financial PhraseBank is
+**CC BY-NC-SA 3.0, non-commercial**.
