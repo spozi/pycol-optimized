@@ -25,10 +25,13 @@ existing rows at random rather than by any clever method. If the clever method
 does no better than random copying, its complexity drop was not about the
 method.
 
-We ran that comparison. **No method beat its own control.** Random oversampling
-appears to reduce N2 by 0.151 — a large, publishable-looking effect — and beats
-its control by **0.0000**. SMOTE's mixed-type variant does *worse* than random
-copying.
+We ran that comparison on Bank Marketing, and then across the 27-dataset
+benchmark suite this literature reports on. **Almost no method beat its own
+control.** Averaged over all 27, random oversampling appears to reduce N2 by
+0.098 — a large, publishable-looking effect — and beats a control that merely
+copies rows at random by **0.0001**. That is 100% of the effect gone. SMOTE
+changes sign: it makes the data measurably *harder* than random copying, on
+**0 of 27** datasets.
 
 But the measures are not broken. When we made the data genuinely harder, by
 flipping a known fraction of labels, they tracked it perfectly (Kendall
@@ -38,7 +41,7 @@ flipping a known fraction of labels, they tracked it perfectly (Kendall
 > from a resampling artifact.** Valid, but not robust.
 
 One measure, T1, did something worse than that: it moved in the *wrong*
-direction as the data got genuinely harder. §6 explains exactly why.
+direction as the data got genuinely harder. §7 explains exactly why.
 
 ---
 
@@ -276,11 +279,73 @@ They just cannot distinguish it from having resampled the data.
 
 ---
 
-## 5. The combined claim
+## 5. Result 3: it holds across the standard benchmark suite
+
+One dataset is not a result. So the same arm-versus-control comparison was run
+across the **27-dataset imbalanced collection** shipped by `imbalanced-learn` —
+the suite this literature reports on — spanning ratios from 8.6:1 to 129.5:1
+and sizes from 336 rows to 145,751 (capped at 15,000; the sweep tests breadth,
+Bank Marketing tested scale).
+
+No cross-validation is needed here. Complexity is deterministic given the data,
+so one computation per dataset and arm answers the question. Folds were only
+ever required for the accuracy half.
+
+Mean difference across all 27, negative meaning simpler:
+
+| method | measure | vs `baseline` | vs **its control** | effect lost | beats control |
+| --- | --- | --- | --- | --- | --- |
+| `ros` | kDN | −0.0173 | −0.0050 | **71%** | 4/27 |
+| `ros` | N2 | **−0.0982** | **−0.0001** | **100%** | 4/27 |
+| `rus` | kDN | +0.1682 | −0.0153 | **91%** | 9/27 |
+| `rus` | N2 | +0.1014 | −0.0040 | **96%** | 5/27 |
+| `smote` | kDN | +0.0125 | **+0.0248** | — | 3/27 |
+| `smote` | N2 | **−0.0639** | **+0.0343** | **sign flips** | **0/27** |
+| `enn` | kDN | −0.0103 | −0.0167 | — | 24/27 |
+| `enn` | N2 | −0.0050 | −0.0086 | — | 24/27 |
+
+"Effect lost" is how much of the apparent improvement disappears once measured
+against the control instead of against `baseline`. "Beats control" counts
+datasets where the method sits more than two control standard deviations below
+its control.
+
+**Random oversampling loses 100% of its N2 effect.** Averaged over the whole
+suite it appears to reduce N2 by 0.0982 — a large, entirely publishable number
+— and beats a control that merely copies existing rows at random by 0.0001.
+Undersampling loses 91–96%.
+
+**SMOTE changes sign.** −0.0639 against baseline becomes **+0.0343** against its
+control. Interpolating synthetic points makes the data measurably *harder* than
+copying real ones, and on **0 of 27 datasets** does SMOTE beat its own null.
+The Bank Marketing result was not a quirk of that dataset.
+
+**ENN is the one exception**, at 24/27 on both primaries — and remains the
+near-circular case, since its selection rule removes precisely the points kDN
+counts. See §11.
+
+### 5.1 A methodological correction the sweep forced
+
+A control is one random resample, so its own sampling noise sits inside every
+comparison. That is mild for oversampling, where arm and control both keep every
+original row, and severe for undersampling on small data, where the surviving
+subset is small and two draws differ substantially.
+
+On `ecoli` (336 rows) random undersampling initially appeared to beat its
+control by **0.0657** on kDN — which would have been reported as a genuine win.
+Averaging three independent control draws and reporting their spread puts it at
+**−0.0229 with a standard deviation of 0.0818**: comfortably inside the noise.
+
+Every control in this sweep is therefore the mean of three draws, and its spread
+is reported alongside. Without that, the sweep would have contained at least one
+false positive.
+
+---
+
+## 6. The combined claim
 
 | | Needed | Observed |
 | --- | --- | --- |
-| Methods do **not** beat their controls | ✔ | 0 of 4 on both primary measures |
+| Methods do **not** beat their controls | ✔ | Bank Marketing 0 of 4; suite-wide SMOTE 0 of 27, ROS loses 100% of its N2 effect |
 | Measures **do** track genuine difficulty | ✔ | τ = +1.00 for kDN, N2, C1 |
 
 > **Valid, but not robust.**
@@ -290,7 +355,7 @@ work" — weaker, and as §4 shows, wrong.
 
 ---
 
-## 6. T1 moves the wrong way, and here is why
+## 7. T1 moves the wrong way, and here is why
 
 T1 counts how many hyperspheres it takes to cover the data, divided by the
 sample count. More spheres means less structure, so **higher should mean
@@ -321,7 +386,7 @@ noise is plausible — which is most real datasets.
 
 ---
 
-## 7. Supporting evidence: the same effect on text
+## 8. Supporting evidence: the same effect on text
 
 Before the tabular work we ran the same design on text, with mask-and-fill
 augmentation (Pozi & Sato 2025) on the Financial PhraseBank, 5 arms × 5 seeds.
@@ -338,7 +403,7 @@ augmentation (Pozi & Sato 2025) on the Financial PhraseBank, 5 arms × 5 seeds.
 
 Two corpora, two domains, two representations, same conclusion.
 
-### 7.1 A dose-response
+### 8.1 A dose-response
 
 Bank Marketing carries **3,731 exact duplicate rows (9.06%)** as distributed.
 Removing them — against a control that removes the same number at random —
@@ -352,7 +417,7 @@ moves N2 by +0.015 and T1 by +0.056, while kDN barely moves at all.
 The artifact scales with the perturbation. That is stronger evidence than
 either point alone.
 
-### 7.2 Contradicted labels in a standard benchmark
+### 8.2 Contradicted labels in a standard benchmark
 
 237 of those duplicate groups carry **conflicting labels** — 542 rows share a
 feature vector with a row labelled differently. No classifier can be right
@@ -362,7 +427,7 @@ reports it. Deduplication silently picks a winner.
 
 ---
 
-## 8. What "genuine" means
+## 9. What "genuine" means
 
 The distinction the whole project turns on:
 
@@ -401,7 +466,7 @@ and no model can recover the lost information.
 
 ---
 
-## 9. Consequences
+## 10. Consequences
 
 **If you compare complexity before and after resampling, you need a control.**
 This applies to SMOTE and its variants, random over- and undersampling,
@@ -429,11 +494,17 @@ distance-based measures are partly reading density. Bank Marketing sits at
 
 ---
 
-## 10. Limitations
+## 11. Limitations
 
-**One tabular dataset.** Bank Marketing only. The text results show the effect
-is not domain-specific, but a KEEL sweep is the obvious next step, and KEEL is
-the benchmark suite this literature actually uses.
+**Scope of each half.** The complexity result spans 27 benchmark datasets plus
+Bank Marketing plus two text corpora. The **accuracy** half rests on Bank
+Marketing alone — the sweep measured complexity only, since that is where the
+claim lies and a classifier on every arm of every dataset would have multiplied
+the runtime for a secondary point.
+
+**The sweep caps datasets at 15,000 rows.** Three of the 27 were subsampled
+stratified. Bank Marketing at 41,188 and the tiled engine cover the larger
+regime, but the sweep itself does not test scale.
 
 **Cross-validation folds are not independent.** Any two training folds share
 3/5 of their rows, so paired tests across them understate variance. We therefore
